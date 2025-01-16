@@ -2,7 +2,7 @@ source("R/00_libraries.R")
 
 # configuration
 
-calibration_start <- as.Date("2022-12-01")
+calibration_start <- as.Date("2023-12-01")
 calibration_end <- as.Date("2024-11-30")
 
 # validate on the 6 months prior to the calibration period
@@ -10,6 +10,10 @@ validation_end <- calibration_start - 1
 validation_start <- lubridate::floor_date(
   validation_end, unit = "months"
 ) %m-% months(6)
+
+# start date for tbats
+tbats_start <- as.Date("2022-12-01")
+tbats_end <- calibration_end
 
 prediction_start <- calibration_end + 1
 prediction_end <- as.Date("2026-03-31")
@@ -65,21 +69,21 @@ treatment_function_codes <- c(
 
 all_complete <- NHSRtt::get_rtt_data(
   type = "complete",
-  date_start = validation_start,
+  date_start = tbats_start,
   date_end = calibration_end,
   show_progress = TRUE
 )
 
 all_incomplete <- NHSRtt::get_rtt_data(
   type = "incomplete",
-  date_start = validation_start,
+  date_start = tbats_start,
   date_end = calibration_end,
   show_progress = TRUE
 )
 
 all_referral <- NHSRtt::get_rtt_data(
   type = "referral",
-  date_start = validation_start,
+  date_start = tbats_start,
   date_end = calibration_end,
   show_progress = TRUE
 )
@@ -126,7 +130,7 @@ monthly_rtt <- dplyr::bind_rows(
     )
   )
 
-# calculate SW values
+# calculate SW regional values
 monthly_rtt_sw <- monthly_rtt |>
   summarise(
     value = sum(value),
@@ -298,7 +302,8 @@ all_calibration_data <- completes |>
       trust, specialty
     )
   )
-# calculating model parameters --------------------------------------------
+
+# calculate model parameters --------------------------------------------
 
 params <- all_calibration_data |>
   mutate(
@@ -314,7 +319,7 @@ params <- all_calibration_data |>
         incompletes = incomp,
         max_months_waited = max_months_waited,
         redistribute_m0_reneges = TRUE,
-        full_breakdown = FALSE # this can be set to TRUE to see all the transitions for all months waited at each time step
+        full_breakdown = FALSE
       )
     )
   ) |>
@@ -498,8 +503,68 @@ validation_error <- validation_period |>
   )
 
 
-# projections - using tbats -----------------------------------------------
-# this projects forward the two years of calibration data
+reorder_vector <- function(x, vals) {
+  first_part <- x[!(x %in% vals)]
+
+  reordered <- c(first_part, vals)
+
+  return(reordered)
+}
+
+p <- validation_error |>
+  mutate(
+    specialty = factor(
+      specialty,
+      levels = reorder_vector(
+        unique(specialty),
+        c("Other", "Total")
+      )
+    )
+  ) |>
+  ggplot(
+
+    aes(
+      x = specialty,
+      y = mean_absolute_percentage_error
+    )
+  ) +
+  geom_boxplot() +
+  theme_bw() +
+  labs(
+    title = "Mean absolute percentage error for SW trusts by specialty",
+    subtitle = paste0(
+      "Calibration period: ",
+      calibration_start,
+      " - ",
+      calibration_end,
+      "\nValidation period: ",
+      validation_start,
+      " - ",
+      validation_end
+    ),
+    y = "MAPE",
+    x = "Specialty"
+  ) +
+  theme(
+    axis.text.x = element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5
+    )
+  )
+
+ggsave(
+  "outputs/mape_by_specialty.png",
+  p,
+  width = 8,
+  height = 7,
+  units = "in",
+  bg = "white"
+)
+
+# projections -----------------------------------------------
+
+# referrals are projected forward using tbats with two years of monthly data
 
 forecast_function <- function(rtt_table, number_timesteps) {
   fcast <- rtt_table |>
@@ -512,7 +577,14 @@ forecast_function <- function(rtt_table, number_timesteps) {
   return(fcast)
 }
 
-tbats_data <- calibration_period |>
+tbats_data <- monthly_rtt |>
+  filter(
+    between(
+      period,
+      tbats_start,
+      tbats_end
+    )
+  ) |>
   anti_join(
     combinations_to_remove,
     by = join_by(
@@ -526,7 +598,7 @@ tbats_referrals <- tbats_data |>
   ) |>
   select(!c("type", "months_waited_id")) |>
   tidyr::nest(
-    cal_period = c(period_id, value)
+    cal_period = c(period, period_id, value)
   ) |>
   mutate(
     ref_projections = purrr::map(
@@ -544,7 +616,7 @@ tbats_referrals <- tbats_data |>
   tidyr::unnest(ref_projections) |>
   select(
     "trust", "trust_name", "specialty",
-    "period_id",
+    # "period_id",
     Expected_referrals = "Point Forecast",
     Low_referrals = "Lo 80",
     High_referrals = "Hi 80"
@@ -556,13 +628,22 @@ tbats_referrals <- tbats_data |>
   ) |>
   tidyr::nest(
     ref_projections = c(
-      period_id, value
+      value
     )
   )
 
-tbats_capacity <-  tbats_data |>
+# the first month for capacity data is based on a linear extrapolation from the
+# previous 12 months of observed data. An optimiser is then used to calculate
+# the annual increase in capacity required to achieve a target performance
+
+projection_capacity <-  monthly_rtt |>
   filter(
-    type == "Complete"
+    type == "Complete",
+    between(
+      period,
+      (calibration_end + 1) %m-% months(12),
+      calibration_end
+    )
   ) |>
   summarise(
     value = sum(value),
@@ -570,43 +651,55 @@ tbats_capacity <-  tbats_data |>
       trust,
       trust_name,
       specialty,
-      period_id
+      period_id,
+      period
     )
   ) |>
-  tidyr::nest(
-    cal_period = c(period_id, value)
+  anti_join(
+    combinations_to_remove,
+    by = join_by(
+      trust, specialty
+    )
   ) |>
   mutate(
-    cap_projections = purrr::map(
-      cal_period,
-      \(x) forecast_function(
-        rtt_table = x,
-        number_timesteps = 16
-      ) |>
-        mutate(
-          period_id = dplyr::row_number()
-        )
+    mean_val = mean(value),
+    median_val = median(value),
+    .by = c(
+      trust,
+      trust_name,
+      specialty
     )
-  ) |>
-  select(!c("cal_period")) |>
-  tidyr::unnest(cap_projections) |>
-  select(
-    "trust", "trust_name", "specialty",
-    "period_id",
-    Expected_capacity = "Point Forecast",
-    Low_capacity = "Lo 80",
-    High_capacity = "Hi 80"
-  ) |>
-  tidyr::pivot_longer(
-    cols = c(Low_capacity, Expected_capacity, High_capacity),
-    names_to = "capacity_scenario",
-    values_to = "value"
   ) |>
   tidyr::nest(
-    cap_projections = c(
-      period_id, value
+    cal_period = c(period, period_id, value)
+  ) |>
+  mutate(
+    lm_fit = purrr::map(
+      cal_period,
+      ~ lm(value ~ period, data = .)
+    ),
+    pval = purrr::map_dbl(
+      lm_fit,
+      \(x) broom::tidy(x) |> filter(term == "period") |> pull(p.value)
+    ),
+    lm_val = purrr::map_dbl(
+      lm_fit,
+      ~ predict(
+        object = .x,
+        newdata = data.frame(period = prediction_start)
+      )
+    ),
+    t_1_capacity = case_when(
+      pval <= 0.05 ~ lm_val,
+      .default = mean_val
     )
+  ) |>
+  dplyr::select(
+    "trust", "trust_name", "specialty", "t_1_capacity"
   )
+
+
+
 
 # observed incompletes at the end of the calibration period
 tbats_incompletes_at_t0 <- tbats_data |>
@@ -623,25 +716,27 @@ tbats_incompletes_at_t0 <- tbats_data |>
   )
 
 
-all_tbats_data <- tbats_capacity |>
+all_projection_data <- projection_capacity |>
   left_join(
     tbats_referrals,
     by = join_by(
       trust, trust_name, specialty
     ),
-    relationship = "many-to-many"
+    relationship = "one-to-many"
   ) |>
   left_join(
     tbats_incompletes_at_t0,
     by = join_by(
       trust, trust_name, specialty
-    )
+    ),
+    relationship = "many-to-one"
   ) |>
   left_join(
     params,
     by = join_by(
       trust, trust_name, specialty
-    )
+    ),
+    relationship = "many-to-one"
   )
 
 # create period lookup
@@ -655,22 +750,274 @@ period_lkp <- dplyr::tibble(
 )
 
 # create projections
-future_projections <- all_tbats_data |>
-  # # the following groups have challenges redistributing incompletes
-  # anti_join(
-  #   tibble(
-  #     trust_name = "UNIVERSITY HOSPITALS PLYMOUTH NHS TRUST",
-  #     specialty = "Cardiothoracic Surgery"
-  #   ),
-  #   by = join_by(
-  #     trust_name,
-  #     specialty
-  #   )
-  # ) |>
+optimised_projections <- all_projection_data |>
+  mutate(
+    annual_linear_uplift = purrr::pmap_dbl(
+      .l = list(
+        t_1_capacity,
+        ref_projections,
+        incompletes_t0,
+        params
+      ),
+      .f = \(t_1_cap, ref_proj, incomp_t0, params) optimise_capacity(
+        t_1_capacity = t_1_cap,
+        referrals_projections = ref_proj |> pull(value),
+        incomplete_pathways = incomp_t0,
+        renege_capacity_params = params,
+        target = "~-5%",
+        target_bin = max_months_waited,
+        tolerance = 0.005,
+        max_iterations = 25
+      )
+    )
+  ) |>
+  select(
+    trust,
+    trust_name,
+    specialty,
+    referrals_scenario,
+    annual_linear_uplift
+  ) |>
+  mutate(
+    trust_name = factor(
+      trust_name,
+      levels = rev(
+        reorder_vector(
+          sort(unique(trust_name)),
+          "SW Total"
+        )
+      )
+    ),
+    specialty = factor(
+      specialty,
+      levels = reorder_vector(
+        sort(unique(specialty)),
+        c("Other", "Total")
+      )
+    )
+  )
+
+# heatmap of capacity change
+p <- optimised_projections |>
+  filter(
+    referrals_scenario == "Expected_referrals"
+  ) |>
+  ggplot(
+    aes(
+      x = specialty,
+      y = trust_name
+    )
+  ) +
+  geom_tile(
+    aes(fill = annual_linear_uplift)
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5
+    )
+  ) +
+  scale_fill_viridis_c(
+
+  ) +
+  labs(
+    title = "Required 12 months uplift in activity to achieve 5% relative reduction in 4 month wait times by the end of March 2026",
+    x = "",
+    y = "",
+    fill = "Activity scaling factor*",
+    caption = "* Activity scaling factor is the scale of the change in activity over a year, applied evenly over each month"
+  )
+
+ggsave(
+  filename = "outputs/activity_requirements.png",
+  plot = p,
+  width = 16,
+  height = 7,
+  units = "in",
+  bg = "white"
+)
+
+optimised_projections |>
+  filter(
+    referrals_scenario == "Expected_referrals"
+  ) |>
+  write.csv(
+    "outputs/activity_requirements_summarised.csv",
+    row.names = FALSE
+  )
+
+# calculate projections activity profile
+full_activity_projections <- optimised_projections |>
+  filter(
+    referrals_scenario == "Expected_referrals"
+  ) |>
+  inner_join(
+    projection_capacity,
+    by = join_by(
+      trust, trust_name, specialty
+    )
+  ) |>
+  mutate(
+    t_13_capacity = t_1_capacity * annual_linear_uplift
+  ) |>
+  filter(
+    !is.na(annual_linear_uplift)
+  ) |>
+  tidyr::pivot_longer(
+    cols = starts_with("t_"),
+    names_to = "period_id",
+    values_to = "capacity"
+  ) |>
+  mutate(
+    period_id = as.numeric(str_extract(period_id, "[[:digit:]]+"))
+  ) |>
+  tidyr::nest(
+    cap_data = c(period_id, capacity)
+  ) |>
+  mutate(
+    lm_fit = purrr::map(
+      cap_data,
+      \(x) lm(capacity ~ period_id, data = x)
+
+    ),
+    projections = purrr::map(
+      lm_fit,
+      \(x) tibble(required_activity = predict(object = x, newdata = tibble(period_id = 1:16))) |>
+        mutate(
+          period = seq(
+            from = as.Date("2024-12-01"),
+            to = as.Date("2026-03-01"),
+            by = "months"
+          )
+        )
+    )
+  ) |>
+  select(
+    trust, trust_name, specialty, referrals_scenario, projections
+  ) |>
+  tidyr::unnest(projections) |>
+  rename(
+    activity = required_activity
+  ) |>
+  mutate(
+    type = "projection"
+  ) |>
+  bind_rows(
+    tbats_data |>
+      filter(
+        type == "Complete"
+      ) |>
+      summarise(
+        activity = sum(value),
+        .by = c(trust, trust_name, specialty, period)
+      ) |>
+      mutate(
+        type = "observed",
+        referrals_scenario = "Observed_referrals"
+      )
+  ) |>
+  relocate(period, .before = activity) |>
+  arrange(
+    trust_name, specialty, period
+  ) |>
+  filter(
+    any(type == "projection"),
+    .by = c(trust, specialty)
+  )
+
+write.csv(
+  full_activity_projections,
+  "outputs/activity_requirements.csv",
+  row.names = FALSE
+)
+
+activity_plot <- full_activity_projections |>
+  mutate(
+    trust_name = gsub(" FOUNDATION| TRUST| NHS", "", trust_name),
+    trust_name = abbreviate(trust_name, 28),
+    trust_name = case_when(
+      trust_name != "SW Total" ~ str_to_title(trust_name),
+      .default = "SW Total"
+    ),
+    trust_name = factor(
+      trust_name,
+      levels = reorder_vector(
+        unique(trust_name),
+        "SW Total"
+      )
+    ),
+    specialty = factor(
+      specialty,
+      levels = reorder_vector(
+        unique(specialty),
+        c("Other", "Total")
+      )
+    )
+  ) |>
+  ggplot(
+    aes(
+      x = period,
+      y = activity
+    )
+  ) +
+  geom_line(
+    aes(colour = type),
+    show.legend = FALSE
+  ) +
+  facet_wrap(
+    facet = vars(trust_name, specialty),
+    scales = "free_y"
+  ) +
+  theme_bw() +
+  labs(
+    y = "Activity",
+    x = ""
+  ) +
+  scale_colour_manual(
+    values = c(
+      "observed" = "black",
+      "projection" = "gold"
+    )
+  )
+
+ggsave(
+  filename = "outputs/activity_plot.png",
+  plot = activity_plot,
+  width = 30,
+  height = 12,
+  units = "in",
+  bg = "white"
+
+)
+
+write.csv(
+  validation_error,
+  "outputs/SW_model_errors.csv",
+  row.names = FALSE
+)
+
+# testing the optimised projections
+optimised_projection_data <- all_projection_data |>
+  select(!c("t_1_capacity")) |>
+  inner_join(
+    full_activity_projections |>
+      rename(
+        value = required_activity
+      ) |>
+      tidyr::nest(capacity = c(period, value)),
+    by = join_by(
+      trust, trust_name, specialty, referrals_scenario
+    )
+  )
+
+future_projections <- optimised_projection_data |>
   mutate(
     waiting_times = purrr::pmap(
       .l = list(
-        cap_projections,
+        capacity,
         ref_projections,
         incompletes_t0,
         params
@@ -693,7 +1040,7 @@ future_projections <- all_tbats_data |>
     trust,
     trust_name,
     specialty,
-    capacity_scenario,
+    # capacity_scenario,
     referrals_scenario,
     waiting_times
   ) |>
@@ -707,62 +1054,27 @@ future_projections <- all_tbats_data |>
   rename(
     value = estimated_incompletes
   ) |>
-  left_join(
-    period_lkp,
-    by = join_by(period_id)
-  )
-
-final_data <- monthly_rtt |>
+  filter(period_id == max(period_id)) |>
+  mutate(
+    apr_26_incomplete_proportion = value / sum(value),
+    .by = c(trust, trust_name, specialty)
+  ) |>
   filter(
-    type == "Incomplete"
+    months_waited_id == max(months_waited_id)
   ) |>
-  mutate(
-    value_type = "observed"
-  ) |>
-  select(!c("type")) |>
-  bind_rows(
-    future_projections
-  ) |>
-  arrange(
-    trust,
-    trust_name,
-    specialty,
-    period,
-    months_waited_id
-  ) |>
-  mutate(
-    scenario = paste(
-      capacity_scenario,
-      referrals_scenario,
-      sep = " - "
-    ),
-    scenario = case_when(
-      scenario == "NA - NA" ~ "Observed data",
-      .default = scenario
-    ),
-    .keep = "unused"
-  ) |>
-  select(
-    trust,
-    trust_name,
-    specialty,
-    period,
-    period_id,
-    months_waited_id,
-    incomplete_counts = value,
-    value_type,
-    scenario
+  select(!c("period_id", "months_waited_id", "value", "value_type")) |>
+  left_join(
+    tbats_incompletes_at_t0 |>
+      mutate(
+        nov_11_incomplete_proportion = purrr::map(
+          incompletes_t0,
+          \(x) x |> mutate(prop = incompletes / sum(incompletes)) |>
+            filter(months_waited_id == max(months_waited_id)) |>
+            pull(prop)
+        )
+      ) |>
+      select(
+        trust, trust_name, specialty, nov_11_incomplete_proportion
+      ),
+    by = join_by(trust, trust_name, specialty)
   )
-
-
-write.csv(
-  final_data,
-  "SW_waiting_times.csv",
-  row.names = F
-)
-
-write.csv(
-  validation_error,
-  "SW_model_errors.csv",
-  row.names = FALSE
-)
