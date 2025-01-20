@@ -1005,7 +1005,7 @@ optimised_projection_data <- all_projection_data |>
   inner_join(
     full_activity_projections |>
       rename(
-        value = required_activity
+        value = activity
       ) |>
       tidyr::nest(capacity = c(period, value)),
     by = join_by(
