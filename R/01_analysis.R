@@ -776,6 +776,7 @@ optimised_projections <- all_projection_data |>
     trust_name,
     specialty,
     referrals_scenario,
+    t_1_cap,
     annual_linear_uplift
   ) |>
   mutate(
@@ -794,13 +795,22 @@ optimised_projections <- all_projection_data |>
         sort(unique(specialty)),
         c("Other", "Total")
       )
-    )
+    ),
+    monthly_cap_change = ((t_1_capacity * annual_linear_uplift) - t_1_capacity) / 12,
+    mar_26_capacity = t_1_capacity + (15 * monthly_cap_change),
+    percentage_change = (mar_26_capacity / t_1_capacity) - 1
   )
 
 # heatmap of capacity change
 p <- optimised_projections |>
   filter(
     referrals_scenario == "Expected_referrals"
+  ) |>
+  mutate(
+    text_colour = case_when(
+      percentage_change > 6 ~ "black",
+      .default = "white"
+    )
   ) |>
   ggplot(
     aes(
@@ -809,11 +819,19 @@ p <- optimised_projections |>
     )
   ) +
   geom_tile(
-    aes(fill = annual_linear_uplift)
+    aes(fill = percentage_change)
+  ) +
+  geom_text(
+    aes(
+      label = scales::label_percent()(percentage_change),
+      colour = text_colour
+    ),
+    show.legend = FALSE
   ) +
   theme_bw() +
   theme(
     legend.position = "bottom",
+    legend.key.width=unit(1.5,"cm"),
     axis.text.x = element_text(
       angle = 90,
       hjust = 1,
@@ -821,14 +839,26 @@ p <- optimised_projections |>
     )
   ) +
   scale_fill_viridis_c(
-
+    labels = scales::label_percent()
+  ) +
+  scale_colour_manual(
+    values = c(
+      "black" = "black",
+      "white" = "white"
+    )
   ) +
   labs(
-    title = "Required 12 months uplift in activity to achieve 5% relative reduction in 4 month wait times by the end of March 2026",
+    title = "Required activity change for March 2026 relative to Dec 2024",
+    subtitle = "Assuming a linear change in activity between the two periods",
     x = "",
     y = "",
-    fill = "Activity scaling factor*",
-    caption = "* Activity scaling factor is the scale of the change in activity over a year, applied evenly over each month"
+    fill = "Relative activity change (Mar 2026 compared with Dec 2024)"
+  ) +
+  guides(
+    fill = guide_colourbar(
+      title.position = "top",
+      title.hjust = 0.5
+    )
   )
 
 ggsave(
@@ -1053,11 +1083,13 @@ future_projections <- optimised_projection_data |>
   ) |>
   rename(
     value = estimated_incompletes
-  ) |>
+  )
+
+year_on_comparison <- future_projections |>
   filter(period_id == max(period_id)) |>
   mutate(
     apr_26_incomplete_proportion = value / sum(value),
-    .by = c(trust, trust_name, specialty)
+    .by = c(trust, trust_name, specialty, period_id)
   ) |>
   filter(
     months_waited_id == max(months_waited_id)
@@ -1066,7 +1098,7 @@ future_projections <- optimised_projection_data |>
   left_join(
     tbats_incompletes_at_t0 |>
       mutate(
-        nov_11_incomplete_proportion = purrr::map(
+        nov_23_incomplete_proportion = purrr::map(
           incompletes_t0,
           \(x) x |> mutate(prop = incompletes / sum(incompletes)) |>
             filter(months_waited_id == max(months_waited_id)) |>
@@ -1074,7 +1106,129 @@ future_projections <- optimised_projection_data |>
         )
       ) |>
       select(
-        trust, trust_name, specialty, nov_11_incomplete_proportion
+        trust, trust_name, specialty, nov_23_incomplete_proportion
       ),
     by = join_by(trust, trust_name, specialty)
   )
+
+
+
+# testing gynae at weston -------------------------------------------------
+
+junk_projections <- optimised_projection_data |>
+  filter(
+    grepl("WESTON", trust_name),
+    grepl("Trauma", specialty)
+  ) |>
+  mutate(
+    waiting_times = purrr::pmap(
+      .l = list(
+        capacity,
+        ref_projections,
+        incompletes_t0,
+        params
+      ),
+      .f = \(cap_proj, ref_proj, incomp_t0, params) apply_params_to_projections(
+        capacity_projections = cap_proj |> pull(value),
+        referrals_projections = ref_proj |> pull(value),
+        incomplete_pathways = incomp_t0,
+        renege_capacity_params = params,
+        max_months_waited = max_months_waited
+      )
+      )
+    ) |>
+  select(waiting_times) |>
+  unnest(waiting_times) |>
+  select(period_id, incompletes, months_waited_id, treatments = "calculated_treatments") |>
+  mutate(
+    period_id = period_id + 24,
+    type = "projected"
+  )
+
+
+junk <- all_calibration_data |>
+  filter(
+    grepl("WESTON", trust_name),
+    grepl("Trauma", specialty)
+  ) |>
+  mutate(
+    junk = pmap(
+      list(
+        completes_data,
+        referrals_data,
+        incompletes_data
+      ),
+      \(x, y, z) y |>
+        mutate(months_waited_id = -1) |>
+        rename(incompletes = referrals) |>
+        bind_rows(
+          z
+        ) |>
+        left_join(
+          x,
+          by = join_by(period_id, months_waited_id)
+        )
+    )
+  ) |>
+  select(junk) |>
+  unnest(junk) |>
+  mutate(
+    type = "observed"
+  ) |>
+  bind_rows(junk_projections) |>
+  pivot_longer(
+    cols = c(treatments, incompletes),
+    names_to = "activity",
+    values_to = "value"
+  ) |>
+  left_join(
+    period_lkp,
+    by = join_by(period_id)
+  ) |>
+  arrange(
+    months_waited_id, activity, period
+  )
+
+
+junk |>
+  filter(
+    period %in% as.Date(
+      c("2024-11-01",
+        "2026-03-01")
+      ),
+    activity == "incompletes",
+    months_waited_id >= 0
+  ) |>
+  arrange(period, months_waited_id) |>
+  mutate(
+    proportion = value / sum(value),
+    .by = period
+  ) |>
+  select(
+    type, period, months_waited_id, incompletes = value, proportion
+  )
+
+ggplot(
+  junk |> filter(type != "projected"),
+  aes(
+    x = period,
+    y = value
+  )
+) +
+  geom_line(
+    aes(
+      group = interaction(activity, type),
+      colour = activity#,
+      # linetype = type
+    )
+  ) +
+  facet_wrap(
+    facets = vars(paste(months_waited_id, "months waited"))
+  ) +
+  labs(
+    x = "",
+    y = "Count"
+  ) +
+  theme_bw()
+
+
