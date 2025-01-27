@@ -1,6 +1,6 @@
 source("R/00_libraries.R")
-
-# configuration
+# source("R/01_functions.R")
+# configuration -----------------------------------------------------------
 
 calibration_start <- as.Date("2023-12-01")
 calibration_end <- as.Date("2024-11-30")
@@ -20,6 +20,9 @@ prediction_end <- as.Date("2026-03-31")
 
 
 max_months_waited <- 12 # I am only interested in waiting time bins up to 12 months
+
+# should analysis include specialty breakdowns
+include_specialty <- FALSE
 
 trust_lkp <- tibble::tribble(
   ~trust_code,                                                 ~trust_name,
@@ -116,6 +119,9 @@ monthly_rtt <- dplyr::bind_rows(
       specialty,
       treatment_function_codes
     )
+  ) |>
+  filter(
+    specialty == "Total"
   ) |>
   summarise(
     value = sum(value),
@@ -532,7 +538,7 @@ p <- validation_error |>
   scale_y_log10()
 
 ggsave(
-  "outputs/v2/mape_by_specialty.png",
+  "outputs/v3/mape_by_specialty.png",
   p,
   width = 8,
   height = 7,
@@ -636,6 +642,12 @@ tbats_capacity <- tbats_data |>
     type == "Complete"
   ) |>
   select(!c("type", "months_waited_id")) |>
+  summarise(
+    value = sum(value),
+    .by = c(
+      trust, trust_name, specialty, period, period_id
+    )
+  ) |>
   tidyr::nest(
     cal_period = c(period, period_id, value)
   ) |>
@@ -867,7 +879,7 @@ scenario_1 <- all_scenario_1_data |>
 
 write.csv(
   scenario_1,
-  "outputs/v2/unoptimised_scenarios.csv",
+  "outputs/v3/unoptimised_scenarios.csv",
   row.names = FALSE
 )
 
@@ -1075,62 +1087,189 @@ scenario_3_projections <- all_projection_data |>
 # Inf means not possible to optimise based on calibration treatment profile
 # NaN means hasn't managed to converge
 
-# heatmap of capacity change
-p_18 <- scenario_2_projections |>
-  filter(
-    referrals_scenario == "Expected_referrals"
+if (isTRUE(include_specialty)) {
+  # heatmap of capacity change
+  p_heatmap <- list(
+    scenario_2_projections,
+    scenario_3_projections
   ) |>
-  mutate(
-    text_colour = case_when(
-      percentage_change > quantile(
-        percentage_change[percentage_change != Inf], 0.95,
-        na.rm = TRUE) ~ "black",
-      is.na(percentage_change) ~ "black",
-      percentage_change == Inf ~ "black",
-      .default = "white"
+    setNames(
+      nm = c(
+        "Required activity change March 2026 relative to Dec 2024 to meet 18ww targets",
+        "Required activity change March 2026 relative to Dec 2024 to meet 52ww targets"
+      )
+    ) |>
+    purrr::imap(
+      \(x, idx) x |>
+        filter(
+          referrals_scenario == "Expected_referrals"
+        ) |>
+        mutate(
+          text_colour = case_when(
+            percentage_change > quantile(
+              percentage_change[percentage_change != Inf], 0.95,
+              na.rm = TRUE) ~ "black",
+            is.na(percentage_change) ~ "black",
+            percentage_change == Inf ~ "black",
+            .default = "white"
+          )
+        ) |>
+        ggplot(
+          aes(
+            x = specialty,
+            y = trust_name
+          )
+        ) +
+        geom_tile(
+          aes(fill = percentage_change)
+        ) +
+        geom_text(
+          aes(
+            label = chart_label,
+            colour = text_colour
+          ),
+          show.legend = FALSE
+        ) +
+        theme_bw() +
+        theme(
+          legend.position = "bottom",
+          legend.key.width=unit(1.5,"cm"),
+          axis.text.x = element_text(
+            angle = 90,
+            hjust = 1,
+            vjust = 0.5
+          )
+        ) +
+        scale_fill_viridis_c(
+          labels = scales::label_percent()
+        ) +
+        scale_colour_manual(
+          values = c(
+            "black" = "black",
+            "white" = "white"
+          )
+        ) +
+        labs(
+          title = idx,
+          subtitle = "Assuming a linear change in activity between the two periods",
+          x = "",
+          y = "",
+          fill = "Relative activity change (Mar 2026 compared with Dec 2024)",
+          captions = paste(
+            "* Unable to optimise because of treatment profile in calibration period",
+            "+ No treatments during calibration period",
+            sep = "\n"
+          )
+        ) +
+        guides(
+          fill = guide_colourbar(
+            title.position = "top",
+            title.hjust = 0.5
+          )
+        )
+    )
+} else {
+  # heatmap of capacity change
+  p_heatmap <- list(
+    scenario_2_projections,
+    scenario_3_projections
+  ) |>
+    setNames(
+      nm = c(
+        "Required activity change March 2026 relative to Dec 2024 to meet 18ww targets",
+        "Required activity change March 2026 relative to Dec 2024 to meet 52ww targets"
+      )
+    ) |>
+    purrr::imap(
+      \(x, idx) x |>
+        filter(
+          referrals_scenario == "Expected_referrals"
+        ) |>
+        mutate(
+          percentage_change = case_when(
+            percentage_change == Inf ~ NA,
+            .default = percentage_change
+          )
+        ) |>
+        arrange(
+          desc(percentage_change)
+        ) |>
+        mutate(
+          trust_name = str_wrap(
+            trust_name, 30
+          ),
+          trust_name = factor(
+            trust_name,
+            levels = reorder_vector(
+              trust_name, "SW Total"
+            )
+          )
+        ) |>
+        ggplot(
+          aes(
+            x = trust_name,
+            y = percentage_change
+          )
+        ) +
+        geom_col(
+          aes(fill = percentage_change),
+          show.legend = FALSE
+        ) +
+        geom_text(
+          aes(
+            label = chart_label
+          ),
+          vjust = -0.5
+        ) +
+        theme_bw() +
+        theme(
+          legend.position = "bottom",
+          legend.key.width=unit(1.5,"cm"),
+          axis.text.x = element_text(
+            angle = 90,
+            hjust = 1,
+            vjust = 0.5
+          )
+        ) +
+        scale_fill_viridis_c(
+          labels = scales::label_percent()
+        ) +
+        scale_y_continuous(labels = scales::label_percent()) +
+        labs(
+          title = idx,
+          subtitle = "Assuming a linear change in activity between the two periods",
+          x = "",
+          y = "Monthly percentage uplift",
+          fill = "Relative activity change (Mar 2026 compared with Dec 2024)"
+        )
+    )
+}
+
+if (isTRUE(include_specialty)) {
+  fig_width <- 16
+} else {
+  fig_width <- 9
+}
+
+p_heatmap |>
+  setNames(
+    nm = c(
+      "activity_requirements_18ww.png",
+      "activity_requirements_52ww.png"
     )
   ) |>
-  heatmap(
-    title = "Required activity change March 2026 relative to Dec 2024 to meet 18ww targets"
+  imap(
+    \(x, idx) x |>
+      ggsave(
+        filename = paste0("outputs/v3/", idx),
+        width = fig_width,
+        height = 7,
+        units = "in",
+        bg = "white"
+      )
   )
 
 
-
-ggsave(
-  filename = "outputs/v2/activity_requirements_18ww.png",
-  plot = p_18,
-  width = 16,
-  height = 7,
-  units = "in",
-  bg = "white"
-)
-
-p_52 <- scenario_3_projections |>
-  filter(
-    referrals_scenario == "Expected_referrals"
-  ) |>
-  mutate(
-    text_colour = case_when(
-      percentage_change > quantile(
-        percentage_change[percentage_change != Inf], 0.95,
-        na.rm = TRUE) ~ "black",
-      is.na(percentage_change) ~ "black",
-      percentage_change == Inf ~ "black",
-      .default = "white"
-    )
-  ) |>
-  heatmap(
-    title = "Required activity change March 2026 relative to Dec 2024 to meet 52ww targets"
-  )
-
-ggsave(
-  filename = "outputs/v2/activity_requirements_52ww.png",
-  plot = p_52,
-  width = 16,
-  height = 7,
-  units = "in",
-  bg = "white"
-)
 
 list(
   scenario_2 = scenario_2_projections,
@@ -1139,18 +1278,17 @@ list(
   iwalk(
     \(x, idx) x  |>
       write.csv(
-        paste0("outputs/v2/", idx, "_activity_requirements_summarised.csv"),
+        paste0("outputs/v3/", idx, "_activity_requirements_summarised.csv"),
         row.names = FALSE
       )
     )
 
 
 # calculate projections activity profile
-scenario_activity_projections <-
-  list(
-    scenario_2 = scenario_2_projections,
-    scenario_3 = scenario_3_projections
-  ) |>
+scenario_activity_projections <- list(
+  scenario_2 = scenario_2_projections,
+  scenario_3 = scenario_3_projections
+) |>
   imap(
     \(x, idx) x |>
       select(
@@ -1200,7 +1338,13 @@ scenario_activity_projections <-
         activity = required_activity
       ) |>
       mutate(
-        type = "projection"
+        type = paste0(
+          "projection",
+          " (based on ",
+          gsub("_", " ", tolower(referrals_scenario)),
+          ")"
+        ),
+        .keep = "unused"
       ) |>
       bind_rows(
         tbats_data |>
@@ -1212,8 +1356,7 @@ scenario_activity_projections <-
             .by = c(trust, trust_name, specialty, period)
           ) |>
           mutate(
-            type = "observed",
-            referrals_scenario = "Observed_referrals"
+            type = "observed"
           )
       ) |>
       relocate(period, .before = activity) |>
@@ -1221,10 +1364,9 @@ scenario_activity_projections <-
         trust_name, specialty, period
       ) |>
       filter(
-        any(type == "projection"),
+        any(grepl("projection", type)),
         .by = c(trust, specialty)
-      ) |>
-      setNames(nm = idx)
+      )
   )
 
 # write to csv
@@ -1232,60 +1374,362 @@ iwalk(
   scenario_activity_projections,
   \(x, idx) write.csv(
     x,
-  paste0("outputs/v2/", idx, "_activity_requirements.csv"),
+  paste0("outputs/v3/", idx, "_activity_requirements.csv"),
   row.names = FALSE
   )
 )
 
+# write model error to csv
+write.csv(
+  validation_error,
+  "outputs/v3/SW_model_errors.csv",
+  row.names = FALSE
+)
 
-# activity_plot <- full_activity_projections |>
-#   mutate(
-#     trust_name = gsub(" FOUNDATION| TRUST| NHS", "", trust_name),
-#     trust_name = abbreviate(trust_name, 28),
-#     trust_name = case_when(
-#       trust_name != "SW Total" ~ str_to_title(trust_name),
-#       .default = "SW Total"
-#     ),
-#     trust_name = factor(
-#       trust_name,
-#       levels = reorder_vector(
-#         unique(trust_name),
-#         "SW Total"
-#       )
-#     ),
-#     specialty = factor(
-#       specialty,
-#       levels = reorder_vector(
-#         unique(specialty),
-#         c("Other", "Total")
-#       )
-#     )
-#   ) |>
-#   ggplot(
-#     aes(
-#       x = period,
-#       y = activity
-#     )
-#   ) +
-#   geom_line(
-#     aes(colour = type),
-#     show.legend = FALSE
-#   ) +
-#   facet_wrap(
-#     facet = vars(trust_name, specialty),
-#     scales = "free_y"
-#   ) +
-#   theme_bw() +
-#   labs(
-#     y = "Activity",
-#     x = ""
-#   ) +
-#   scale_colour_manual(
-#     values = c(
-#       "observed" = "black",
-#       "projection" = "gold"
-#     )
-#   )
+
+# explanation charts ------------------------------------------------------
+
+trust_example <- "RN3"
+
+# demand chart
+example_tbats_referrals <- tbats_referrals |>
+  filter(
+    trust == trust_example
+  ) |>
+  unnest(ref_projections) |>
+  rename(
+    scenario = referrals_scenario
+  ) |>
+  mutate(
+    period_id = row_number() + max(monthly_rtt$period_id),
+    .by = scenario
+  ) |>
+  left_join(
+    period_lkp,
+    by = join_by(
+      period_id
+    )
+  ) |>
+  select(
+    trust, trust_name, scenario, value, period
+  )
+
+example_referrals <- tbats_data |>
+  filter(
+    trust == trust_example,
+    type == "Referrals"
+  ) |>
+  mutate(
+    scenario = "Observed"
+  ) |>
+  select(
+    trust, trust_name, scenario, value, period
+  ) |>
+  bind_rows(
+    example_tbats_referrals
+  ) |>
+  ggplot(
+    aes(
+      x = period,
+      y = value
+    )
+  ) +
+  geom_line(
+    aes(
+      group = scenario,
+      linetype = scenario
+    ),
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = example_tbats_referrals |>
+      filter(
+        period == max(period)
+      ),
+    aes(
+      label = str_wrap(paste(gsub("_", " ", scenario), "scenario"), 15)
+    ),
+    hjust = -0.1
+  ) +
+  theme_bw() +
+  scale_x_date(
+    expand = expansion(mult = c(0, 0.25))
+  ) +
+  labs(
+    title = "Observed referrals with projected referral scenarios",
+    subtitle = paste(
+      "Referral scenarios are generated with TBATS time series methods",
+      "The high and low scenarios are the 80% high- and low- confidence intervals",
+      sep = "\n"
+    ),
+    y = "Number of referrals",
+    x = ""
+  ) +
+  scale_linetype_manual(
+    name = "Scenario",
+    values = c(
+      "Observed" = "solid",
+      Low_referrals = "dashed",
+      Expected_referrals = "dashed",
+      High_referrals = "dashed"
+    )
+  )
+
+ggsave(
+  plot = example_referrals,
+  filename = "outputs/referral_inputs.png",
+  width = 8,
+  height = 6,
+  units = "in",
+  bg = "white"
+)
+
+# baseline capacity
+example_tbats_capacity <- tbats_capacity |>
+  filter(
+    trust == trust_example
+  ) |>
+  unnest(cap_projections) |>
+  rename(
+    scenario = capacity_scenario
+  ) |>
+  mutate(
+    period_id = row_number() + max(monthly_rtt$period_id),
+    .by = scenario
+  ) |>
+  left_join(
+    period_lkp,
+    by = join_by(
+      period_id
+    )
+  ) |>
+  select(
+    trust, trust_name, scenario, value, period
+  )
+
+example_capacity <- tbats_data |>
+  filter(
+    trust == trust_example,
+    type == "Complete"
+  ) |>
+  mutate(
+    scenario = "Observed"
+  ) |>
+  summarise(
+    value = sum(value),
+    .by = c(
+      trust, trust_name, scenario, period
+    )
+  ) |>
+  bind_rows(
+    example_tbats_capacity
+  ) |>
+  ggplot(
+    aes(
+      x = period,
+      y = value
+    )
+  ) +
+  geom_line(
+    aes(
+      group = scenario,
+      linetype = scenario
+    ),
+    show.legend = FALSE
+  ) +
+  geom_text(
+    data = example_tbats_capacity |>
+      filter(
+        period == max(period)
+      ),
+    aes(
+      label = str_wrap(paste(gsub("_", " ", scenario), "scenario"), 15)
+    ),
+    hjust = -0.1
+  ) +
+  theme_bw() +
+  scale_x_date(
+    expand = expansion(mult = c(0, 0.25))
+  ) +
+  labs(
+    title = "Observed activity with projected activity scenarios",
+    subtitle = paste(
+      "Activity scenarios are generated with TBATS time series methods",
+      "The high and low scenarios are the 80% high- and low-confidence intervals",
+      sep = "\n"
+    ),
+    y = "Count of completed activity",
+    x = ""
+  ) +
+  scale_linetype_manual(
+    name = "Scenario",
+    values = c(
+      "Observed" = "solid",
+      Low_capacity = "dashed",
+      Expected_capacity = "dashed",
+      High_capacity = "dashed"
+    )
+  )
+
+ggsave(
+  plot = example_capacity,
+  filename = "outputs/capacity_unoptimised_inputs.png",
+  width = 8,
+  height = 6,
+  units = "in",
+  bg = "white"
+)
+
+# optimised capacity plots
+fill_triangle <- scenario_activity_projections[[1]] |>
+  filter(
+    trust == trust_example,
+    type != "observed"
+  ) |>
+  filter(
+    period %in% range(period)
+  ) |>
+  select(
+    period, activity
+  ) |>
+  (\(x) add_row(
+    x,
+    period = max(x$period),
+    activity = x |>
+      slice(1) |>
+      pull(activity))
+  )()
+
+chart_labels <- scenario_activity_projections[[1]] |>
+  filter(
+    trust == trust_example,
+    type != "observed"
+  ) |>
+  filter(
+    period %in% range(period)
+  )
+
+optimised_capacity <- scenario_activity_projections[[1]] |>
+  filter(
+    trust == trust_example
+  ) |>
+  mutate(
+    type = str_to_sentence(type)
+  ) |>
+  ggplot(
+    aes(
+      x = period,
+      y = activity
+    )
+  ) +
+  geom_polygon(
+    data = fill_triangle,
+    fill = "blue",
+    alpha = 0.1
+  ) +
+  geom_line(
+    aes(
+      linetype = type
+    )
+  ) +
+  geom_point(
+    data = chart_labels |>
+      slice(1:2),
+    size = 4
+  ) +
+  geom_text(
+    data = chart_labels,
+    aes(
+      label = round2(activity, 1),
+    ),
+    hjust = 1,
+    nudge_x = 1,
+    nudge_y = 200
+  ) +
+  geom_label(
+    data = chart_labels |>
+      slice(1:2) |>
+      summarise(
+        period = min(period) + (2/3) * (max(period) - min(period)),
+        activity = min(activity) + (1/5) * (max(activity) - min(activity))
+      ),
+    label = "Additional activity"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom"
+  ) +
+  labs(
+    y = "Count of completed activity",
+    x = "",
+    title = "Required activity to reach 5% improvement on 18 week waittime"
+  ) +
+  scale_linetype_manual(
+    name = "Scenario",
+    values = c(
+      "Observed" = "solid",
+      "Projection (based on expected referrals)" = "dashed"
+    )
+
+  )
+
+ggsave(
+  plot = optimised_capacity,
+  filename = "outputs/monthly_activity_to_meet_5%_improvement.png",
+  width = 9,
+  height = 6,
+  units = "in",
+  bg = "white"
+)
+
+activity_plot <- full_activity_projections |>
+  mutate(
+    trust_name = gsub(" FOUNDATION| TRUST| NHS", "", trust_name),
+    trust_name = abbreviate(trust_name, 28),
+    trust_name = case_when(
+      trust_name != "SW Total" ~ str_to_title(trust_name),
+      .default = "SW Total"
+    ),
+    trust_name = factor(
+      trust_name,
+      levels = reorder_vector(
+        unique(trust_name),
+        "SW Total"
+      )
+    ),
+    specialty = factor(
+      specialty,
+      levels = reorder_vector(
+        unique(specialty),
+        c("Other", "Total")
+      )
+    )
+  ) |>
+  ggplot(
+    aes(
+      x = period,
+      y = activity
+    )
+  ) +
+  geom_line(
+    aes(colour = type),
+    show.legend = FALSE
+  ) +
+  facet_wrap(
+    facet = vars(trust_name, specialty),
+    scales = "free_y"
+  ) +
+  theme_bw() +
+  labs(
+    y = "Activity",
+    x = ""
+  ) +
+  scale_colour_manual(
+    values = c(
+      "observed" = "black",
+      "projection" = "gold"
+    )
+  )
 #
 # ggsave(
 #   filename = "outputs/activity_plot.png",
@@ -1297,11 +1741,7 @@ iwalk(
 #
 # )
 
-write.csv(
-  validation_error,
-  "outputs/v2/SW_model_errors.csv",
-  row.names = FALSE
-)
+
 
 # # testing the optimised projections
 # optimised_projection_data <- all_projection_data |>
