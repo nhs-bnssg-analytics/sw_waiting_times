@@ -1,15 +1,14 @@
 source("R/00_libraries.R")
-# source("R/01_functions.R")
+source("R/02_functions.R")
 # configuration -----------------------------------------------------------
 
+# final calibration period
 calibration_start <- as.Date("2023-12-01")
 calibration_end <- as.Date("2024-11-30")
 
-# validate on the 6 months prior to the calibration period
-validation_end <- calibration_start - 1
-validation_start <- lubridate::floor_date(
-  validation_end, unit = "months"
-) %m-% months(6)
+# validate on the final calibration period
+validation_start <- calibration_start
+validation_end <- calibration_end
 
 # start date for tbats
 tbats_start <- as.Date("2022-12-01")
@@ -175,12 +174,14 @@ monthly_rtt <- bind_rows(
   )
 
 
+# first calibration for validation ----------------------------------------
+
 calibration_period <- monthly_rtt |>
   filter(
     between(
       period,
-      calibration_start,
-      calibration_end
+      floor_date((validation_start - 1) %m-% months(12), unit = "months"),
+      (validation_start - 1)
     )
   ) |>
   summarise(
@@ -204,89 +205,11 @@ calibration_period <- monthly_rtt |>
     value
   )
 
-referrals <- calibration_period |>
-  filter(
-    type == "Referrals"
-  ) |>
-  distinct(
-    trust,
-    trust_name,
-    specialty,
-    period_id,
-    value
-  ) |>
-  rename(
-    referrals = "value"
-  ) |>
-  tidyr::nest(
-    referrals_data = c(
-      period_id,
-      referrals
-    )
-  )
+all_calibration_data <- create_modelling_data(
+  calibration_period
+)
 
-completes <- calibration_period |>
-  filter(
-    type == "Complete"
-  ) |>
-  distinct(
-    trust,
-    trust_name,
-    specialty,
-    period_id,
-    months_waited_id,
-    value
-  ) |>
-  rename(
-    treatments = "value"
-  ) |>
-  tidyr::nest(
-    completes_data = c(
-      period_id,
-      months_waited_id,
-      treatments
-    )
-  )
-
-
-incompletes <- calibration_period |>
-  filter(
-    type == "Incomplete"
-  ) |>
-  distinct(
-    trust,
-    trust_name,
-    specialty,
-    period_id,
-    months_waited_id,
-    value
-  ) |>
-  rename(
-    incompletes = "value"
-  ) |>
-  tidyr::nest(
-    incompletes_data = c(
-      period_id,
-      months_waited_id,
-      incompletes
-    )
-  )
-
-all_calibration_data <- completes |>
-  left_join(
-    referrals,
-    by = join_by(
-      trust, trust_name, specialty
-    )
-  ) |>
-  left_join(
-    incompletes,
-    by = join_by(
-      trust, trust_name, specialty
-    )
-  )
-
-# calculate model parameters --------------------------------------------
+# calculate validation model parameters --------------------------------------------
 
 params <- all_calibration_data |>
   mutate(
@@ -332,82 +255,11 @@ validation_period <- monthly_rtt |>
     value
   )
 
-validation_referrals <- validation_period |>
-  filter(
-    type == "Referrals",
-    period_id != min(period_id)
-  ) |>
-  distinct(
-    trust,
-    trust_name,
-    specialty,
-    period_id,
-    value
-  ) |>
-  arrange(
-    trust,
-    trust_name,
-    specialty,
-    period_id
-  ) |>
-  select(!c("period_id")) |>
-  tidyr::nest(
-    referrals = value
-  )
+# validation data
 
-validation_capacity <- validation_period |>
-  filter(
-    type == "Complete",
-    period_id != min(period_id)
-  ) |>
-  summarise(
-    count = sum(value),
-    .by = c(
-      trust,
-      trust_name,
-      specialty,
-      period_id
-    )
-  ) |>
-  arrange(
-    trust,
-    trust_name,
-    specialty,
-    period_id
-  ) |>
-  select(!c("period_id")) |>
-  tidyr::nest(
-    completes = count
-  )
-
-incompletes_at_t0 <- validation_period |>
-  filter(
-    type == "Incomplete",
-    period_id == min(period_id)
-  ) |>
-  distinct(
-    trust,
-    trust_name,
-    specialty,
-    months_waited_id,
-    value
-  ) |>
-  rename(incompletes = value) |>
-  tidyr::nest(
-    incompletes = c(months_waited_id, incompletes)
-  )
-
-# combine validation period data
-
-all_validation_data <- validation_capacity |>
-  left_join(
-    validation_referrals,
-    by = join_by(trust, trust_name, specialty)
-  ) |>
-  left_join(
-    incompletes_at_t0,
-    by = join_by(trust, trust_name, specialty)
-  ) |>
+all_validation_data <- create_modelling_data(
+  validation_period
+) |>
   right_join(
     params,
     by = join_by(trust, trust_name, specialty)
@@ -415,6 +267,9 @@ all_validation_data <- validation_capacity |>
 
 # apply parameters to validation period
 validation_waiting_times <- all_validation_data |>
+  rename_with(
+    ~ gsub("_data", "", .x)
+  ) |>
   mutate(
     waiting_times = purrr::pmap(
       .l = list(
@@ -424,9 +279,23 @@ validation_waiting_times <- all_validation_data |>
         params
       ),
       .f = \(cap_proj, ref_proj, incomp_t0, params) apply_params_to_projections(
-        capacity_projections = cap_proj |> pull(count),
-        referrals_projections = ref_proj |> pull(value),
-        incomplete_pathways = incomp_t0,
+        capacity_projections = cap_proj |>
+          summarise(count = sum(treatments),
+                    .by = period_id) |>
+          filter(
+            period_id != min(period_id)
+          ) |>
+          pull(count),
+        referrals_projections = ref_proj |>
+          filter(
+            period_id != min(period_id)
+          ) |>
+          pull(referrals),
+        incomplete_pathways = incomp_t0 |>
+          filter(
+            period_id == min(period_id)
+          ) |>
+          select(!c("period_id")),
         renege_capacity_params = params,
         max_months_waited = max_months_waited
       ) |>
@@ -447,7 +316,8 @@ validation_waiting_times <- all_validation_data |>
     waiting_times
   ) |>
   mutate(
-    period_id = period_id + 1 # this aligns period_id with the id in the validation_period data
+    # this aligns period_id with the id in the validation_period data
+    period_id = period_id - 1 + min(validation_period$period_id)
   )
 
 validation_error <- validation_period |>
@@ -545,6 +415,72 @@ ggsave(
   units = "in",
   bg = "white"
 )
+
+# write model error to csv
+write.csv(
+  validation_error,
+  "outputs/v3/SW_model_errors.csv",
+  row.names = FALSE
+)
+
+# final calibration -------------------------------------------------------
+calibration_period <- monthly_rtt |>
+  filter(
+    between(
+      period,
+      calibration_start,
+      calibration_end
+    )
+  ) |>
+  summarise(
+    value = sum(value),
+    .by = c(
+      trust,
+      trust_name,
+      specialty,
+      period_id,
+      type,
+      months_waited_id
+    )
+  ) |>
+  dplyr::select(
+    trust,
+    trust_name,
+    specialty,
+    period_id,
+    type,
+    months_waited_id,
+    value
+  )
+
+all_calibration_data <- create_modelling_data(
+  calibration_period
+)
+
+# calculate validation model parameters --------------------------------------------
+
+params <- all_calibration_data |>
+  mutate(
+    params = purrr::pmap(
+      .l = list(
+        referrals_data,
+        completes_data,
+        incompletes_data
+      ),
+      .f = \(ref, comp, incomp) calibrate_capacity_renege_params(
+        referrals = ref,
+        completes = comp,
+        incompletes = incomp,
+        max_months_waited = max_months_waited,
+        redistribute_m0_reneges = TRUE,
+        full_breakdown = FALSE
+      )
+    )
+  ) |>
+  select(
+    trust, trust_name, specialty, params
+  )
+
 
 # projections -----------------------------------------------
 
@@ -878,7 +814,10 @@ scenario_1 <- all_scenario_1_data |>
   relocate(period, .before = months_waited_id)
 
 write.csv(
-  scenario_1,
+  scenario_1 |>
+    arrange(
+      trust, specialty, referrals_scenario, capacity_scenario, period, months_waited_id
+    ),
   "outputs/v3/unoptimised_scenarios.csv",
   row.names = FALSE
 )
@@ -1379,17 +1318,12 @@ iwalk(
   )
 )
 
-# write model error to csv
-write.csv(
-  validation_error,
-  "outputs/v3/SW_model_errors.csv",
-  row.names = FALSE
-)
+
 
 
 # explanation charts ------------------------------------------------------
 
-trust_example <- "RN3"
+trust_example <- "R0D"
 
 # demand chart
 example_tbats_referrals <- tbats_referrals |>
@@ -1434,7 +1368,7 @@ example_referrals <- tbats_data |>
       y = value
     )
   ) +
-  geom_line(
+  geom_step(
     aes(
       group = scenario,
       linetype = scenario
@@ -1530,7 +1464,7 @@ example_capacity <- tbats_data |>
       y = value
     )
   ) +
-  geom_line(
+  geom_step(
     aes(
       group = scenario,
       linetype = scenario
@@ -1580,25 +1514,39 @@ ggsave(
   bg = "white"
 )
 
+
 # optimised capacity plots
-fill_triangle <- scenario_activity_projections[[1]] |>
+fill_area <- scenario_activity_projections[[1]] |>
   filter(
     trust == trust_example,
     type != "observed"
   ) |>
-  filter(
-    period %in% range(period)
+  mutate(
+    dummy = min(activity),
+    activity = activity - dummy
+  ) |>
+  pivot_longer(
+    cols = c(activity, dummy),
+    names_to = "col_fill",
+    values_to = "activity"
   ) |>
   select(
-    period, activity
+    period, col_fill, activity
   ) |>
-  (\(x) add_row(
-    x,
-    period = max(x$period),
-    activity = x |>
-      slice(1) |>
-      pull(activity))
-  )()
+  tidyr::complete(
+    period = seq(
+      from = min(period),
+      to = max(period) %m+% months(1) - 1,
+      by = "days"
+    ),
+    col_fill
+  ) |>
+  arrange(
+    col_fill, period
+  ) |>
+  tidyr::fill(
+    activity
+  )
 
 chart_labels <- scenario_activity_projections[[1]] |>
   filter(
@@ -1622,12 +1570,17 @@ optimised_capacity <- scenario_activity_projections[[1]] |>
       y = activity
     )
   ) +
-  geom_polygon(
-    data = fill_triangle,
-    fill = "blue",
-    alpha = 0.1
+  geom_col(
+    data = fill_area,
+    aes(
+      fill = col_fill
+    ),
+    alpha = 0.1,
+    just = 0,
+    width = 1,
+    show.legend = FALSE
   ) +
-  geom_line(
+  geom_step(
     aes(
       linetype = type
     )
@@ -1640,7 +1593,7 @@ optimised_capacity <- scenario_activity_projections[[1]] |>
   geom_text(
     data = chart_labels,
     aes(
-      label = round2(activity, 1),
+      label = round2(activity, 0),
     ),
     hjust = 1,
     nudge_x = 1,
@@ -1670,7 +1623,25 @@ optimised_capacity <- scenario_activity_projections[[1]] |>
       "Observed" = "solid",
       "Projection (based on expected referrals)" = "dashed"
     )
-
+  ) +
+  scale_fill_manual(
+    name = "",
+    values = c(
+      "dummy" = NA,
+      "activity" = "blue"
+    ),
+    na.value = "transparent"
+  ) +
+  coord_cartesian(
+    ylim = c(
+      scenario_activity_projections[[1]] |>
+        filter(
+          trust == trust_example
+          ) |>
+        pull(activity) |>
+        min() * 0.95,
+      NA
+    )
   )
 
 ggsave(
@@ -1682,54 +1653,329 @@ ggsave(
   bg = "white"
 )
 
-activity_plot <- full_activity_projections |>
+# baseline and optimised 18 week waittime
+
+# first calculate the incompletes under the optimised scneario
+optimised_projection_data <- all_projection_data |>
+  filter(
+    trust == trust_example,
+    referrals_scenario == "Expected_referrals"
+  ) |>
+  select(!c("t_1_capacity")) |>
+  inner_join(
+    scenario_activity_projections[[1]] |>
+      rename(
+        value = activity
+      ) |>
+      filter(type != "observed") |>
+      select(!c("type")) |>
+      tidyr::nest(capacity = c(period, value)),
+    by = join_by(
+      trust, trust_name, specialty
+    )
+  )
+
+future_projections <- optimised_projection_data |>
   mutate(
-    trust_name = gsub(" FOUNDATION| TRUST| NHS", "", trust_name),
-    trust_name = abbreviate(trust_name, 28),
-    trust_name = case_when(
-      trust_name != "SW Total" ~ str_to_title(trust_name),
-      .default = "SW Total"
-    ),
-    trust_name = factor(
-      trust_name,
-      levels = reorder_vector(
-        unique(trust_name),
-        "SW Total"
+    waiting_times = purrr::pmap(
+      .l = list(
+        capacity,
+        ref_projections,
+        incompletes_t0,
+        params
+      ),
+      .f = \(cap_proj, ref_proj, incomp_t0, params) apply_params_to_projections(
+        capacity_projections = cap_proj |> pull(value),
+        referrals_projections = ref_proj |> pull(value),
+        incomplete_pathways = incomp_t0,
+        renege_capacity_params = params,
+        max_months_waited = max_months_waited
+      ) |>
+        select(
+          period_id,
+          months_waited_id,
+          estimated_incompletes = incompletes
+        )
+    )
+  ) |>
+  select(
+    trust,
+    trust_name,
+    specialty,
+    # capacity_scenario,
+    referrals_scenario,
+    waiting_times
+  ) |>
+  tidyr::unnest(
+    waiting_times
+  ) |>
+  mutate(
+    period_id = period_id + max(monthly_rtt$period_id),
+    value_type = "projected"
+  ) |>
+  left_join(
+    period_lkp,
+    by = join_by(period_id)
+  ) |>
+  select(any_of(names(scenario_1)))
+
+waiting_time_scenarios_plot <- tbats_data |>
+  filter(
+    type == "Incomplete"
+  ) |>
+  rename(
+    estimated_incompletes = value
+  ) |>
+  select(any_of(names(scenario_1))) |>
+  bind_rows(
+    scenario_1,
+    future_projections
+  ) |>
+  filter(
+    trust == trust_example
+  ) |>
+  mutate(
+    wait_time = case_when(
+      months_waited_id < 4 ~ "Less than 4 months",
+      .default = "4+ months"
+    )
+  ) |>
+  summarise(
+    estimated_incompletes = sum(estimated_incompletes),
+    .by = c(
+      trust_name, referrals_scenario, capacity_scenario, period, wait_time
+    )
+  ) |>
+  mutate(
+    proportion_incomplete = estimated_incompletes / sum(estimated_incompletes),
+    .by = c(
+      trust_name, referrals_scenario, capacity_scenario, period
+    )
+  ) |>
+  filter(
+    wait_time == "Less than 4 months"
+  ) |>
+  mutate(
+    scenario = case_when(
+      is.na(referrals_scenario) ~ "Observed",
+      is.na(capacity_scenario) ~ "Optimised",
+      .default = paste(
+        gsub("_", " ", referrals_scenario),
+        gsub("_", " ", capacity_scenario),
+        sep = "; "
       )
     ),
-    specialty = factor(
-      specialty,
-      levels = reorder_vector(
-        unique(specialty),
-        c("Other", "Total")
+    scenario = factor(
+      scenario,
+      levels = c(
+        "Observed",
+        "Optimised",
+        "Low referrals; Low capacity",
+        "Low referrals; Expected capacity",
+        "Low referrals; High capacity",
+        "Expected referrals; Expected capacity",
+        "Expected referrals; Low capacity",
+        "Expected referrals; High capacity",
+        "High referrals; Low capacity",
+        "High referrals; Expected capacity",
+        "High referrals; High capacity"
       )
     )
   ) |>
   ggplot(
     aes(
       x = period,
-      y = activity
+      y = proportion_incomplete
     )
   ) +
-  geom_line(
-    aes(colour = type),
-    show.legend = FALSE
+  geom_step(
+    aes(
+      group = scenario,
+      colour = scenario,
+      linetype = scenario,
+      linewidth = scenario
+    )
   ) +
+  theme_bw() +
+  scale_colour_manual(
+    name = "Scenario",
+    values = c(
+      "Observed" = "black",
+      "Low referrals; Low capacity" = "#d55e00",
+      "Expected referrals; Low capacity" = "#d55e00",
+      "High referrals; Low capacity" = "#d55e00",
+      "Low referrals; Expected capacity" = "#cc79a7",
+      "Expected referrals; Expected capacity" = "#cc79a7",
+      "High referrals; Expected capacity" = "#cc79a7",
+      "Low referrals; High capacity" = "#0072b2",
+      "Expected referrals; High capacity" = "#0072b2",
+      "High referrals; High capacity" = "#0072b2",
+      "Optimised" = "#009e73"
+    )
+  ) +
+  scale_linetype_manual(
+    name = "Scenario",
+    values = c(
+      "Observed" = "solid",
+      "Low referrals; Low capacity" = "solid",
+      "Expected referrals; Low capacity" = "dashed",
+      "High referrals; Low capacity" = "dotted",
+      "Low referrals; Expected capacity" = "solid",
+      "Expected referrals; Expected capacity" = "dashed",
+      "High referrals; Expected capacity" = "dotted",
+      "Low referrals; High capacity" = "solid",
+      "Expected referrals; High capacity" = "dashed",
+      "High referrals; High capacity" = "dotted",
+      "Optimised" = "solid"
+    )
+  ) +
+  scale_linewidth_manual(
+    name = "Scenario",
+    values = c(
+      "Observed" = 1,
+      "Low referrals; Low capacity" = 0.5,
+      "Expected referrals; Low capacity" = 0.5,
+      "High referrals; Low capacity" = 0.5,
+      "Low referrals; Expected capacity" = 0.5,
+      "Expected referrals; Expected capacity" = 0.5,
+      "High referrals; Expected capacity" = 0.5,
+      "Low referrals; High capacity" = 0.5,
+      "Expected referrals; High capacity" = 0.5,
+      "High referrals; High capacity" = 0.5,
+      "Optimised" = 1
+    )
+  ) +
+  scale_y_continuous(
+    labels = scales::label_percent()
+  ) +
+  labs(
+    title = "Modelled proportion of incomplete pathways waiting less than 4 months since referral",
+    y = "Proportion of incomplete pathways waiting less than 4 months",
+    x = ""
+  )
+
+ggsave(
+  plot = waiting_time_scenarios_plot,
+  filename = "outputs/waiting_time_scenarios_plot_incl_optimised.png",
+  width = 10,
+  height = 6,
+  units = "in",
+  bg = "white"
+)
+
+# params chart
+
+param_chart <- params |>
+  filter(
+    trust == trust_example
+  ) |>
+  unnest(
+    params
+  ) |>
+  pivot_longer(
+    cols = ends_with("param"),
+    names_to = "param",
+    values_to = "val"
+  ) |>
+  mutate(
+    months_waited = case_when(
+      months_waited_id == max(months_waited_id) ~ paste0(months_waited_id, "+"),
+      .default = paste(months_waited_id, months_waited_id + 1, sep = "-")
+    ),
+    months_waited = factor(
+      months_waited,
+      levels = unique(months_waited)
+    ),
+    param = str_to_sentence(
+      gsub("_param", " parameter", param)
+    ),
+    param = case_when(
+      grepl("Cap", param) ~ paste(
+        param,
+        "(the proportion of people waiting for treatment that receive treatment)",
+        sep = "\n"
+      ),
+      .default = paste(
+        param,
+        "(the proportion of people waiting for treatment that renege)",
+        sep = "\n"
+      )
+    )
+  ) |>
+  ggplot(
+    aes(
+      x = months_waited,
+      y = val
+    )
+  ) +
+  geom_point() +
   facet_wrap(
-    facet = vars(trust_name, specialty),
-    scales = "free_y"
+    facet = vars(param)
   ) +
   theme_bw() +
   labs(
-    y = "Activity",
-    x = ""
-  ) +
-  scale_colour_manual(
-    values = c(
-      "observed" = "black",
-      "projection" = "gold"
-    )
+    title = "Example modelling parameters",
+    y = "Parameter value",
+    x = "Months on waiting list"
   )
+
+
+ggsave(
+  plot = param_chart,
+  filename = "outputs/param_chart.png",
+  width = 10,
+  height = 6,
+  units = "in",
+  bg = "white"
+)
+# activity_plot <- full_activity_projections |>
+#   mutate(
+#     trust_name = gsub(" FOUNDATION| TRUST| NHS", "", trust_name),
+#     trust_name = abbreviate(trust_name, 28),
+#     trust_name = case_when(
+#       trust_name != "SW Total" ~ str_to_title(trust_name),
+#       .default = "SW Total"
+#     ),
+#     trust_name = factor(
+#       trust_name,
+#       levels = reorder_vector(
+#         unique(trust_name),
+#         "SW Total"
+#       )
+#     ),
+#     specialty = factor(
+#       specialty,
+#       levels = reorder_vector(
+#         unique(specialty),
+#         c("Other", "Total")
+#       )
+#     )
+#   ) |>
+#   ggplot(
+#     aes(
+#       x = period,
+#       y = activity
+#     )
+#   ) +
+#   geom_line(
+#     aes(colour = type),
+#     show.legend = FALSE
+#   ) +
+#   facet_wrap(
+#     facet = vars(trust_name, specialty),
+#     scales = "free_y"
+#   ) +
+#   theme_bw() +
+#   labs(
+#     y = "Activity",
+#     x = ""
+#   ) +
+#   scale_colour_manual(
+#     values = c(
+#       "observed" = "black",
+#       "projection" = "gold"
+#     )
+#   )
 #
 # ggsave(
 #   filename = "outputs/activity_plot.png",
