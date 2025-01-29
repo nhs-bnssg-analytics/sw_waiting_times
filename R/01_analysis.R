@@ -408,7 +408,7 @@ p <- validation_error |>
   scale_y_log10()
 
 ggsave(
-  "outputs/v3/mape_by_specialty.png",
+  "outputs/v4/mape_by_specialty.png",
   p,
   width = 8,
   height = 7,
@@ -419,7 +419,7 @@ ggsave(
 # write model error to csv
 write.csv(
   validation_error,
-  "outputs/v3/SW_model_errors.csv",
+  "outputs/v4/SW_model_errors.csv",
   row.names = FALSE
 )
 
@@ -818,7 +818,7 @@ write.csv(
     arrange(
       trust, specialty, referrals_scenario, capacity_scenario, period, months_waited_id
     ),
-  "outputs/v3/unoptimised_scenarios.csv",
+  "outputs/v4/unoptimised_scenarios.csv",
   row.names = FALSE
 )
 
@@ -1200,7 +1200,7 @@ p_heatmap |>
   imap(
     \(x, idx) x |>
       ggsave(
-        filename = paste0("outputs/v3/", idx),
+        filename = paste0("outputs/v4/", idx),
         width = fig_width,
         height = 7,
         units = "in",
@@ -1217,7 +1217,7 @@ list(
   iwalk(
     \(x, idx) x  |>
       write.csv(
-        paste0("outputs/v3/", idx, "_activity_requirements_summarised.csv"),
+        paste0("outputs/v4/", idx, "_activity_requirements_summarised.csv"),
         row.names = FALSE
       )
     )
@@ -1313,7 +1313,7 @@ iwalk(
   scenario_activity_projections,
   \(x, idx) write.csv(
     x,
-  paste0("outputs/v3/", idx, "_activity_requirements.csv"),
+  paste0("outputs/v4/", idx, "_activity_requirements.csv"),
   row.names = FALSE
   )
 )

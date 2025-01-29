@@ -43,14 +43,14 @@
     },
     "NHSRtt": {
       "Package": "NHSRtt",
-      "Version": "0.1.4",
+      "Version": "0.1.5",
       "Source": "GitHub",
       "RemoteType": "github",
       "RemoteHost": "api.github.com",
       "RemoteRepo": "NHSRtt",
       "RemoteUsername": "nhs-bnssg-analytics",
       "RemoteRef": "HEAD",
-      "RemoteSha": "66da02a89154e611bba051294a76fd14a3faa522",
+      "RemoteSha": "57ab415f0c99135035ce1fcb9eb15571d0411611",
       "Requirements": [
         "dplyr",
         "lubridate",
@@ -61,7 +61,7 @@
         "tidyr",
         "xml2"
       ],
-      "Hash": "1515fac04a6ced5f28c678665db6ee2a"
+      "Hash": "6c66e9024b3032631c1684a43b59fc7d"
     },
     "R6": {
       "Package": "R6",
@@ -221,13 +221,13 @@
     },
     "curl": {
       "Package": "curl",
-      "Version": "6.1.0",
+      "Version": "6.2.0",
       "Source": "Repository",
-      "Repository": "CRAN",
+      "Repository": "RSPM",
       "Requirements": [
         "R"
       ],
-      "Hash": "8dd23d308c751efdf675124aad4bf5d7"
+      "Hash": "b580cbb010099fd990df6bfe44459e1a"
     },
     "dplyr": {
       "Package": "dplyr",
