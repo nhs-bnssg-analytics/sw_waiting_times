@@ -119,9 +119,6 @@ monthly_rtt <- dplyr::bind_rows(
       treatment_function_codes
     )
   ) |>
-  filter(
-    specialty == "Total"
-  ) |>
   summarise(
     value = sum(value),
     .by = c(
@@ -133,6 +130,13 @@ monthly_rtt <- dplyr::bind_rows(
       months_waited_id
     )
   )
+
+if (!isTRUE(include_specialty)) {
+  monthly_rtt <- monthly_rtt |>
+    filter(
+      specialty == "Total"
+    )
+}
 
 # calculate SW regional values
 monthly_rtt_sw <- monthly_rtt |>
@@ -356,14 +360,6 @@ validation_error <- validation_period |>
   )
 
 
-reorder_vector <- function(x, vals) {
-  first_part <- x[!(x %in% vals)]
-
-  reordered <- c(first_part, vals)
-
-  return(reordered)
-}
-
 p <- validation_error |>
   mutate(
     specialty = factor(
@@ -387,9 +383,9 @@ p <- validation_error |>
     title = "Mean absolute percentage error for SW trusts by specialty",
     subtitle = paste0(
       "Calibration period: ",
-      calibration_start,
+      floor_date((validation_start - 1) %m-% months(12), unit = "months"),
       " - ",
-      calibration_end,
+      (validation_start - 1),
       "\nValidation period: ",
       validation_start,
       " - ",
@@ -822,6 +818,84 @@ write.csv(
   row.names = FALSE
 )
 
+# create time series of observed period plus scenario 1 projections
+data_projections_ref_cap_scenarios <- all_scenario_1_data |>
+  select(
+    "trust","trust_name", "specialty", "capacity_scenario", "cap_projections",
+    "referrals_scenario", "ref_projections"
+  ) |>
+  mutate(
+    projections = map2(
+      cap_projections,
+      ref_projections,
+      ~ bind_cols(
+        .x |> rename(capacity_projections = value),
+        .y |> rename(referral_projections = value)
+      ) |>
+        mutate(
+          period = seq(
+            from = prediction_start,
+            to = lubridate::floor_date(prediction_end, unit = "months"),
+            by = "months"
+          )
+        )
+    ),
+    .keep = "unused"
+  ) |>
+  unnest(
+    projections
+  ) |>
+  pivot_wider(
+    names_from = c(referrals_scenario),
+    values_from = c(referral_projections)
+  ) |>
+  pivot_wider(
+    names_from = c(capacity_scenario),
+    values_from = c(capacity_projections)
+  ) |>
+  mutate(
+    type = "Projected"
+  )
+
+# join the above to historic data and write to csv
+tbats_data |>
+  filter(
+    type %in% c("Complete", "Referrals")
+  ) |>
+  summarise(
+    value = sum(value),
+    .by = c(
+      trust, trust_name, specialty, period, type
+    )
+  ) |>
+  left_join(
+    tibble(
+      type = c(rep("Complete", 3), rep("Referrals", 3)),
+      scenario = c(
+        paste(c("Low", "Expected", "High"), "capacity", sep = "_"),
+        paste(c("Low", "Expected", "High"), "referrals", sep = "_")
+      )
+    ),
+    by = join_by(type),
+    relationship = "many-to-many"
+  ) |>
+  mutate(
+    type = "Observed"
+  ) |>
+  tidyr::pivot_wider(
+    names_from = scenario,
+    values_from = value
+  ) |>
+  bind_rows(data_projections_ref_cap_scenarios) |>
+  arrange(
+    trust, specialty, period
+  ) |>
+  write.csv(
+    "outputs/v4/activity_referral_tbats_projections.csv",
+    row.names = FALSE
+  )
+
+
 # Scenario 2 projections
 
 # include a proper rounding function
@@ -981,7 +1055,7 @@ scenario_3_projections <- all_projection_data |>
         renege_capacity_params = params,
         target = "1%",
         target_bin = max_months_waited,
-        tolerance = 0.005,
+        tolerance = 0.001,
         max_iterations = 25
       )
     )
@@ -1044,13 +1118,27 @@ if (isTRUE(include_specialty)) {
           referrals_scenario == "Expected_referrals"
         ) |>
         mutate(
-          text_colour = case_when(
-            percentage_change > quantile(
-              percentage_change[percentage_change != Inf], 0.95,
-              na.rm = TRUE) ~ "black",
-            is.na(percentage_change) ~ "black",
-            percentage_change == Inf ~ "black",
-            .default = "white"
+          fill_colour = case_when(
+            percentage_change < -2 ~ "< -200%",
+            percentage_change < -1 ~ "-200% to -100",
+            percentage_change < 0 ~ "-100% to 0%",
+            percentage_change < 1 ~ "0 - 100%",
+            percentage_change < 2 ~ "100% - 200%",
+            percentage_change == Inf ~ NA,
+            is.nan(percentage_change) ~ NA,
+            is.na(percentage_change) ~ NA,
+            .default = "> 200%"
+          ),
+          fill_colour = factor(
+            fill_colour,
+            levels = c(
+              "< -200%",
+              "-200% to -100",
+              "-100% to 0%",
+              "0 - 100%",
+              "100% - 200%",
+              "> 200%"
+            )
           )
         ) |>
         ggplot(
@@ -1060,12 +1148,13 @@ if (isTRUE(include_specialty)) {
           )
         ) +
         geom_tile(
-          aes(fill = percentage_change)
+          aes(fill = fill_colour),
+          show.legend = FALSE
         ) +
         geom_text(
           aes(
             label = chart_label,
-            colour = text_colour
+            colour = fill_colour
           ),
           show.legend = FALSE
         ) +
@@ -1079,13 +1168,20 @@ if (isTRUE(include_specialty)) {
             vjust = 0.5
           )
         ) +
-        scale_fill_viridis_c(
-          labels = scales::label_percent()
+        scale_fill_viridis_d(
+          na.value = "white"
         ) +
         scale_colour_manual(
           values = c(
-            "black" = "black",
-            "white" = "white"
+            c(
+              "< -200%" = "white",
+              "-200% to -100" = "white",
+              "-100% to 0%" = "white",
+              "0 - 100%" = "black",
+              "100% - 200%" = "black",
+              "> 200%" = "black"
+            ),
+            na.value = "black"
           )
         ) +
         labs(
@@ -1099,13 +1195,13 @@ if (isTRUE(include_specialty)) {
             "+ No treatments during calibration period",
             sep = "\n"
           )
-        ) +
-        guides(
-          fill = guide_colourbar(
-            title.position = "top",
-            title.hjust = 0.5
-          )
-        )
+        ) #+
+        # guides(
+        #   fill = guide_colourbar(
+        #     title.position = "top",
+        #     title.hjust = 0.5
+        #   )
+        # )
     )
 } else {
   # heatmap of capacity change
@@ -1324,11 +1420,13 @@ iwalk(
 # explanation charts ------------------------------------------------------
 
 trust_example <- "R0D"
+specialty_example <- "General Internal Medicine"
 
 # demand chart
 example_tbats_referrals <- tbats_referrals |>
   filter(
-    trust == trust_example
+    trust == trust_example,
+    specialty == specialty_example
   ) |>
   unnest(ref_projections) |>
   rename(
@@ -1351,6 +1449,7 @@ example_tbats_referrals <- tbats_referrals |>
 example_referrals <- tbats_data |>
   filter(
     trust == trust_example,
+    specialty == specialty_example,
     type == "Referrals"
   ) |>
   mutate(
@@ -1421,7 +1520,8 @@ ggsave(
 # baseline capacity
 example_tbats_capacity <- tbats_capacity |>
   filter(
-    trust == trust_example
+    trust == trust_example,
+    specialty == specialty_example
   ) |>
   unnest(cap_projections) |>
   rename(
@@ -1444,6 +1544,7 @@ example_tbats_capacity <- tbats_capacity |>
 example_capacity <- tbats_data |>
   filter(
     trust == trust_example,
+    specialty == specialty_example,
     type == "Complete"
   ) |>
   mutate(
@@ -1519,6 +1620,7 @@ ggsave(
 fill_area <- scenario_activity_projections[[1]] |>
   filter(
     trust == trust_example,
+    specialty == specialty_example,
     type != "observed"
   ) |>
   mutate(
@@ -1551,6 +1653,7 @@ fill_area <- scenario_activity_projections[[1]] |>
 chart_labels <- scenario_activity_projections[[1]] |>
   filter(
     trust == trust_example,
+    specialty == specialty_example,
     type != "observed"
   ) |>
   filter(
@@ -1559,7 +1662,8 @@ chart_labels <- scenario_activity_projections[[1]] |>
 
 optimised_capacity <- scenario_activity_projections[[1]] |>
   filter(
-    trust == trust_example
+    trust == trust_example,
+    specialty == specialty_example
   ) |>
   mutate(
     type = str_to_sentence(type)

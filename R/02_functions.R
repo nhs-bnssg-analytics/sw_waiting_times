@@ -84,3 +84,12 @@ create_modelling_data <- function(data) {
   return(all_calibration_data)
 
 }
+
+
+reorder_vector <- function(x, vals) {
+  first_part <- x[!(x %in% vals)]
+
+  reordered <- c(first_part, vals)
+
+  return(reordered)
+}
