@@ -963,8 +963,8 @@ scenario_2_projections <- all_projection_data |>
         renege_capacity_params = params,
         target = target,
         target_bin = target_bin,
-        tolerance = 0.005,
-        max_iterations = 25
+        tolerance = 0.001,
+        max_iterations = 35
       )
     ),
     status = names(unlist(annual_linear_uplift)),
@@ -1776,7 +1776,7 @@ ggsave(
 
 # baseline and optimised 18 week waittime
 
-# first calculate the incompletes under the optimised scneario
+# first calculate the incompletes under the optimised scenario
 optimised_projection_data <- all_projection_data |>
   filter(
     trust == trust_example,
@@ -2111,83 +2111,136 @@ ggsave(
 
 
 # # testing the optimised projections
-# optimised_projection_data <- all_projection_data |>
-#   select(!c("t_1_capacity")) |>
-#   inner_join(
-#     full_activity_projections |>
-#       rename(
-#         value = activity
-#       ) |>
-#       tidyr::nest(capacity = c(period, value)),
-#     by = join_by(
-#       trust, trust_name, specialty, referrals_scenario
-#     )
-#   )
-#
-# future_projections <- optimised_projection_data |>
-#   mutate(
-#     waiting_times = purrr::pmap(
-#       .l = list(
-#         capacity,
-#         ref_projections,
-#         incompletes_t0,
-#         params
-#       ),
-#       .f = \(cap_proj, ref_proj, incomp_t0, params) apply_params_to_projections(
-#         capacity_projections = cap_proj |> pull(value),
-#         referrals_projections = ref_proj |> pull(value),
-#         incomplete_pathways = incomp_t0,
-#         renege_capacity_params = params,
-#         max_months_waited = max_months_waited
-#       ) |>
-#         select(
-#           period_id,
-#           months_waited_id,
-#           estimated_incompletes = incompletes
-#         )
-#     )
-#   ) |>
-#   select(
-#     trust,
-#     trust_name,
-#     specialty,
-#     # capacity_scenario,
-#     referrals_scenario,
-#     waiting_times
-#   ) |>
-#   tidyr::unnest(
-#     waiting_times
-#   ) |>
-#   mutate(
-#     period_id = period_id + 31,
-#     value_type = "projected"
-#   ) |>
-#   rename(
-#     value = estimated_incompletes
-#   )
-#
-# year_on_comparison <- future_projections |>
-#   filter(period_id == max(period_id)) |>
-#   mutate(
-#     apr_26_incomplete_proportion = value / sum(value),
-#     .by = c(trust, trust_name, specialty, period_id)
-#   ) |>
-#   filter(
-#     months_waited_id == max(months_waited_id)
-#   ) |>
-#   select(!c("period_id", "months_waited_id", "value", "value_type")) |>
-#   left_join(
-#     tbats_incompletes_at_t0 |>
-#       mutate(
-#         nov_23_incomplete_proportion = purrr::map(
-#           incompletes_t0,
-#           \(x) x |> mutate(prop = incompletes / sum(incompletes)) |>
-#             filter(months_waited_id == max(months_waited_id)) |>
-#             pull(prop)
-#         )
-#       ) |>
-#       select(
-#         trust, trust_name, specialty, nov_23_incomplete_proportion
-#       ),
-#     by = join_by(trust, trust_name, specialty)
-#   )
+optimised_projection_data <- all_projection_data |>
+  filter(referrals_scenario == "Expected_referrals") |>
+  select(!c("t_1_capacity")) |>
+  inner_join(
+    scenario_2_projections |>
+      select(trust, t_1_capacity, mar_26_capacity) |>
+      # mutate(
+      #   mar_26_capacity = case_when(
+      #     mar_26_capacity > t_1_capacity ~ mar_26_capacity * 0.98,
+      #     mar_26_capacity < t_1_capacity ~ mar_26_capacity * 1.02
+      #   )
+      # ) |>
+      pivot_longer(
+        cols = c(t_1_capacity, mar_26_capacity),
+        names_to = "period_id",
+        values_to = "value"
+      ) |>
+      mutate(
+        period_id = case_when(
+          period_id == "t_1_capacity" ~ 1,
+          period_id == "mar_26_capacity" ~ 16
+        )
+      ) |>
+      tidyr::nest(
+        model_data = c(period_id, value)
+      ) |>
+      mutate(
+        lm_fit = map(model_data, ~lm(value ~ period_id, data = .x)),
+        capacity = map(lm_fit, ~predict(.x, newdata = tibble(period_id = 1:16)) |> enframe())
+      ) |>
+      select(trust, capacity),
+    by = join_by(
+      trust
+    )
+  )
+
+future_projections <- optimised_projection_data |>
+  mutate(
+    waiting_times = purrr::pmap(
+      .l = list(
+        capacity,
+        ref_projections,
+        incompletes_t0,
+        params
+      ),
+      .f = \(cap_proj, ref_proj, incomp_t0, params) apply_params_to_projections(
+        capacity_projections = cap_proj |> pull(value),
+        referrals_projections = ref_proj |> pull(value),
+        incomplete_pathways = incomp_t0,
+        renege_capacity_params = params,
+        max_months_waited = max_months_waited
+      ) |>
+        select(
+          period_id,
+          months_waited_id,
+          estimated_incompletes = incompletes
+        )
+    )
+  ) |>
+  select(
+    trust,
+    trust_name,
+    specialty,
+    # capacity_scenario,
+    referrals_scenario,
+    waiting_times
+  ) |>
+  tidyr::unnest(
+    waiting_times
+  ) |>
+  mutate(
+    period_id = period_id + 31,
+    value_type = "projected"
+  ) |>
+  rename(
+    value = estimated_incompletes
+  )
+
+target_month <- 4
+
+year_on_comparison <- future_projections |>
+  filter(period_id == max(period_id)) |>
+  mutate(
+    perf = case_when(
+      months_waited_id < target_month ~ "below",
+      .default = "above"
+    )
+  ) |>
+  summarise(
+    value = sum(value),
+    .by = c(trust, trust_name, specialty, referrals_scenario, period_id, perf)
+  ) |>
+  mutate(
+    apr_26_incomplete_proportion = value / sum(value),
+    .by = c(trust, trust_name, specialty, period_id, referrals_scenario)
+  ) |>
+  filter(
+    perf == "below"
+  ) |>
+  select(!c("period_id", "value", "perf")) |>
+  left_join(
+    lm_proj_incompletes_at_t0 |>
+      mutate(
+        nov_24_incomplete_proportion = purrr::map_dbl(
+          incompletes_t0,
+          \(x) x  |>
+            mutate(
+              perf = case_when(
+                months_waited_id < target_month ~ "below",
+                .default = "above"
+              )
+            ) |>
+            summarise(
+              value = sum(incompletes),
+              .by = c(perf)
+            ) |>
+            mutate(
+              apr_26_incomplete_proportion = value / sum(value)
+            ) |>
+            filter(
+              perf == "below"
+            )|>
+            pull(apr_26_incomplete_proportion)
+        )
+      ) |>
+      select(
+        trust, trust_name, specialty, nov_24_incomplete_proportion
+      ),
+    by = join_by(trust, trust_name, specialty)
+  ) |>
+  relocate(
+    nov_24_incomplete_proportion, .before = apr_26_incomplete_proportion
+  )
