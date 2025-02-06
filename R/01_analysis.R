@@ -68,35 +68,16 @@ treatment_function_codes <- c(
 
 # download data -----------------------------------------------------------
 
-all_complete <- NHSRtt::get_rtt_data(
-  type = "complete",
+monthly_rtt <- NHSRtt::get_rtt_data(
   date_start = tbats_start,
   date_end = calibration_end,
+  trust_codes = trust_lkp$trust_code,
   show_progress = TRUE
 )
-
-all_incomplete <- NHSRtt::get_rtt_data(
-  type = "incomplete",
-  date_start = tbats_start,
-  date_end = calibration_end,
-  show_progress = TRUE
-)
-
-all_referral <- NHSRtt::get_rtt_data(
-  type = "referral",
-  date_start = tbats_start,
-  date_end = calibration_end,
-  show_progress = TRUE
-)
-
 
 # aggregate and manipulate ------------------------------------------------
 
-monthly_rtt <- dplyr::bind_rows(
-  all_complete,
-  all_incomplete,
-  all_referral
-) |>
+monthly_rtt <- monthly_rtt |>
   inner_join(
     trust_lkp,
     by = join_by(
@@ -104,12 +85,6 @@ monthly_rtt <- dplyr::bind_rows(
     )
   ) |>
   mutate(
-    type = case_when(
-      type == "Non-Admitted" ~ "Complete",
-      type == "Admitted" ~ "Complete",
-      type == "New Periods" ~ "Referrals",
-      .default = type
-    ),
     months_waited_id = convert_months_waited_to_id(
       months_waited,
       max_months_waited
@@ -228,7 +203,7 @@ params <- all_calibration_data |>
         completes = comp,
         incompletes = incomp,
         max_months_waited = max_months_waited,
-        redistribute_m0_reneges = TRUE,
+        redistribute_m0_reneges = FALSE,
         full_breakdown = FALSE
       )
     )
@@ -404,7 +379,7 @@ p <- validation_error |>
   scale_y_log10()
 
 ggsave(
-  "outputs/v4/mape_by_specialty.png",
+  "outputs/v6/mape_by_specialty.png",
   p,
   width = 8,
   height = 7,
@@ -415,12 +390,12 @@ ggsave(
 # write model error to csv
 write.csv(
   validation_error,
-  "outputs/v4/SW_model_errors.csv",
+  "outputs/v6/SW_model_errors.csv",
   row.names = FALSE
 )
 
 # final calibration -------------------------------------------------------
-calibration_period <- monthly_rtt |>
+calibration_period_final <- monthly_rtt |>
   filter(
     between(
       period,
@@ -449,13 +424,12 @@ calibration_period <- monthly_rtt |>
     value
   )
 
-all_calibration_data <- create_modelling_data(
-  calibration_period
+all_calibration_data_final <- create_modelling_data(
+  calibration_period_final
 )
 
 # calculate validation model parameters --------------------------------------------
-
-params <- all_calibration_data |>
+params_final <- all_calibration_data_final |>
   mutate(
     params = purrr::pmap(
       .l = list(
@@ -468,7 +442,7 @@ params <- all_calibration_data |>
         completes = comp,
         incompletes = incomp,
         max_months_waited = max_months_waited,
-        redistribute_m0_reneges = TRUE,
+        redistribute_m0_reneges = FALSE,
         full_breakdown = FALSE
       )
     )
@@ -497,30 +471,18 @@ params <- all_calibration_data |>
 
 # REFERRALS
 
-# all scenarios will use the same referrals data. Referrals are projected
-# forward using tbats with two years of monthly data
+# all scenarios will use the same referrals data
 
-forecast_function <- function(rtt_table, number_timesteps) {
-  fcast <- rtt_table |>
-    pull(value) |>
-    ts(frequency = 12) |>
-    forecast::tbats() |>
-    forecast::forecast(h = number_timesteps) |>
-    tidyr::as_tibble()
-
-  return(fcast)
-}
-
-tbats_data <- monthly_rtt |>
+lm_proj_data <- monthly_rtt |>
   filter(
     between(
       period,
-      tbats_start,
-      tbats_end
+      calibration_start,
+      calibration_end
     )
   )
 
-tbats_referrals <- tbats_data |>
+lm_proj_referrals <- lm_proj_data |>
   filter(
     type == "Referrals"
   ) |>
@@ -533,21 +495,18 @@ tbats_referrals <- tbats_data |>
       cal_period,
       \(x) forecast_function(
         rtt_table = x,
-        number_timesteps = 16
-      ) |>
-        mutate(
-          period_id = dplyr::row_number()
+        number_timesteps = 16,
+        method = "linear",
+        percent_change = c(
+          Low_referrals = 0,
+          Expected_referrals = 1,
+          High_referrals = 2.5
         )
+      )
     )
   ) |>
   select(!c("cal_period")) |>
   tidyr::unnest(ref_projections) |>
-  select(
-    "trust", "trust_name", "specialty",
-    Expected_referrals = "Point Forecast",
-    Low_referrals = "Lo 80",
-    High_referrals = "Hi 80"
-  ) |>
   tidyr::pivot_longer(
     cols = c(Low_referrals, Expected_referrals, High_referrals),
     names_to = "referrals_scenario",
@@ -562,14 +521,14 @@ tbats_referrals <- tbats_data |>
   ) |>
   tidyr::nest(
     ref_projections = c(
-      value
+      period_id, value
     )
   )
 
 # CAPACITY
 
 # scenario 1 will use a timeseries projection for activity
-tbats_capacity <- tbats_data |>
+lm_proj_capacity <- lm_proj_data |>
   filter(
     type == "Complete"
   ) |>
@@ -588,21 +547,18 @@ tbats_capacity <- tbats_data |>
       cal_period,
       \(x) forecast_function(
         rtt_table = x,
-        number_timesteps = 16
-      ) |>
-        mutate(
-          period_id = dplyr::row_number()
+        number_timesteps = 16,
+        method = "linear",
+        percent_change = c(
+          Low_capacity = -2.5,
+          Expected_capacity = 0,
+          High_capacity = 2.5
         )
+      )
     )
   ) |>
   select(!c("cal_period")) |>
   tidyr::unnest(cap_projections) |>
-  select(
-    "trust", "trust_name", "specialty",
-    Expected_capacity = "Point Forecast",
-    Low_capacity = "Lo 80",
-    High_capacity = "Hi 80"
-  ) |>
   tidyr::pivot_longer(
     cols = c(Low_capacity, Expected_capacity, High_capacity),
     names_to = "capacity_scenario",
@@ -617,7 +573,7 @@ tbats_capacity <- tbats_data |>
   ) |>
   tidyr::nest(
     cap_projections = c(
-      value
+      period_id, value
     )
   )
 
@@ -627,7 +583,7 @@ tbats_capacity <- tbats_data |>
 # optimiser is then used to calculate the annual increase in capacity required
 # to achieve a target performance
 
-projection_capacity <-  monthly_rtt |>
+projection_capacity <- monthly_rtt |>
   filter(
     type == "Complete",
     between(
@@ -677,6 +633,11 @@ projection_capacity <-  monthly_rtt |>
     t_1_capacity = case_when(
       pval <= 0.05 ~ lm_val,
       .default = mean_val
+    ),
+    # capacity can't be less than zero, so it is fixed to zero if so
+    t_1_capacity = case_when(
+      t_1_capacity < 0 ~ 0,
+      .default = t_1_capacity
     )
   ) |>
   dplyr::select(
@@ -689,7 +650,7 @@ projection_capacity <-  monthly_rtt |>
 # All three scenarios use the observed incompletes from Nov 2024
 
 # observed incompletes at the end of the calibration period
-tbats_incompletes_at_t0 <- tbats_data |>
+lm_proj_incompletes_at_t0 <- lm_proj_data |>
   filter(
     type == "Incomplete",
     period_id == max(period_id)
@@ -706,23 +667,23 @@ tbats_incompletes_at_t0 <- tbats_data |>
 
 # scenario 1
 
-all_scenario_1_data <- tbats_capacity |>
+all_scenario_1_data <- lm_proj_capacity |>
   left_join(
-    tbats_referrals,
+    lm_proj_referrals,
     by = join_by(
       trust, trust_name, specialty
     ),
     relationship = "many-to-many"
   ) |>
   left_join(
-    tbats_incompletes_at_t0,
+    lm_proj_incompletes_at_t0,
     by = join_by(
       trust, trust_name, specialty
     ),
     relationship = "many-to-one"
   ) |>
   left_join(
-    params,
+    params_final,
     by = join_by(
       trust, trust_name, specialty
     ),
@@ -733,21 +694,21 @@ all_scenario_1_data <- tbats_capacity |>
 
 all_projection_data <- projection_capacity |>
   left_join(
-    tbats_referrals,
+    lm_proj_referrals,
     by = join_by(
       trust, trust_name, specialty
     ),
     relationship = "one-to-many"
   ) |>
   left_join(
-    tbats_incompletes_at_t0,
+    lm_proj_incompletes_at_t0,
     by = join_by(
       trust, trust_name, specialty
     ),
     relationship = "many-to-one"
   ) |>
   left_join(
-    params,
+    params_final,
     by = join_by(
       trust, trust_name, specialty
     ),
@@ -759,7 +720,7 @@ all_projection_data <- projection_capacity |>
 
 # create period lookup
 period_lkp <- dplyr::tibble(
-  period_id = 1:(max(calibration_period$period_id) + 16),
+  period_id = 1:(max(calibration_period_final$period_id) + 16),
   period = seq(
     from = min(monthly_rtt$period),
     to = as.Date("2026-03-01"),
@@ -814,7 +775,7 @@ write.csv(
     arrange(
       trust, specialty, referrals_scenario, capacity_scenario, period, months_waited_id
     ),
-  "outputs/v4/unoptimised_scenarios.csv",
+  "outputs/v6/unoptimised_scenarios.csv",
   row.names = FALSE
 )
 
@@ -829,8 +790,8 @@ data_projections_ref_cap_scenarios <- all_scenario_1_data |>
       cap_projections,
       ref_projections,
       ~ bind_cols(
-        .x |> rename(capacity_projections = value),
-        .y |> rename(referral_projections = value)
+        .x |> select(value) |> rename(capacity_projections = value),
+        .y |> select(value) |> rename(referral_projections = value)
       ) |>
         mutate(
           period = seq(
@@ -858,7 +819,7 @@ data_projections_ref_cap_scenarios <- all_scenario_1_data |>
   )
 
 # join the above to historic data and write to csv
-tbats_data |>
+monthly_rtt |>
   filter(
     type %in% c("Complete", "Referrals")
   ) |>
@@ -891,23 +852,32 @@ tbats_data |>
     trust, specialty, period
   ) |>
   write.csv(
-    "outputs/v4/activity_referral_tbats_projections.csv",
+    "outputs/v6/activity_referral_lm_projections.csv",
     row.names = FALSE
   )
 
-
 # Scenario 2 projections
 
-# include a proper rounding function
-# from here: https://stackoverflow.com/questions/12688717/round-up-from-5
-round2 = function(x, digits) {
-  posneg = sign(x)
-  z = abs(x)*10^digits
-  z = z + 0.5 + sqrt(.Machine$double.eps)
-  z = trunc(z)
-  z = z/10^digits
-  z*posneg
-}
+# ignore specialties-trust combinations where lower than threshold number of
+# treatments have occurred in calibration year
+threshold <- 50
+
+poor_calibration <- calibration_period |>
+  filter(
+    type == "Complete"
+  ) |>
+  summarise(
+    value = sum(value),
+    .by = c(
+      trust, trust_name, specialty
+    )
+  ) |>
+  filter(
+    value <= threshold
+  ) |>
+  select("trust", "trust_name", "specialty") |>
+  mutate(status = "low_completed_pathways_in_calibration_period")
+
 
 # calculate targets by trust
 # scenario 2 wants to optimise at 18 weeks, which is roughly bin 4 to 5 months
@@ -978,7 +948,7 @@ scenario_2_projections <- all_projection_data |>
     relationship = "many-to-one"
   ) |>
   mutate(
-    annual_linear_uplift = purrr::pmap_dbl(
+    annual_linear_uplift = purrr::pmap(
       .l = list(
         t_1_capacity,
         ref_projections,
@@ -996,7 +966,9 @@ scenario_2_projections <- all_projection_data |>
         tolerance = 0.005,
         max_iterations = 25
       )
-    )
+    ),
+    status = names(unlist(annual_linear_uplift)),
+    annual_linear_uplift = as.numeric(annual_linear_uplift)
   ) |>
   select(
     trust,
@@ -1004,7 +976,15 @@ scenario_2_projections <- all_projection_data |>
     specialty,
     referrals_scenario,
     t_1_capacity,
-    annual_linear_uplift
+    annual_linear_uplift,
+    status
+  ) |>
+  dplyr::rows_update(
+    poor_calibration,
+    by = c(
+      "trust", "trust_name", "specialty"
+    ),
+    unmatched = "ignore"
   ) |>
   mutate(
     trust_name = factor(
@@ -1027,10 +1007,17 @@ scenario_2_projections <- all_projection_data |>
     mar_26_capacity = t_1_capacity + (15 * monthly_cap_change),
     percentage_change = (mar_26_capacity / t_1_capacity) - 1,
     chart_label = case_when(
-      is.nan(annual_linear_uplift) ~ "*",
-      annual_linear_uplift == Inf ~ "*",
-      is.na(annual_linear_uplift) ~ "+",
-      .default = scales::label_percent(accuracy = 1)(percentage_change)
+      status == "low_completed_pathways_in_calibration_period" ~ "-",
+      status == "no_starting_capacity" ~ "+",
+      # annual_linear_uplift == Inf ~ "*",
+      # is.na(annual_linear_uplift) ~ "+",
+      status == "waitlist_cleared" ~ paste0(
+        scales::label_percent(accuracy = 1, big.mark = ",")(percentage_change),
+        "*"
+      ),
+      .default = scales::label_percent(
+        accuracy = 1,
+        big.mark = ",")(percentage_change)
     )
   )
 
@@ -1041,7 +1028,7 @@ scenario_3_projections <- all_projection_data |>
     referrals_scenario == "Expected_referrals"
   ) |>
   mutate(
-    annual_linear_uplift = purrr::pmap_dbl(
+    annual_linear_uplift = purrr::pmap(
       .l = list(
         t_1_capacity,
         ref_projections,
@@ -1058,7 +1045,9 @@ scenario_3_projections <- all_projection_data |>
         tolerance = 0.001,
         max_iterations = 25
       )
-    )
+    ),
+    status = names(unlist(annual_linear_uplift)),
+    annual_linear_uplift = as.numeric(annual_linear_uplift)
   ) |>
   select(
     trust,
@@ -1066,7 +1055,15 @@ scenario_3_projections <- all_projection_data |>
     specialty,
     referrals_scenario,
     t_1_capacity,
+    status,
     annual_linear_uplift
+  ) |>
+  dplyr::rows_update(
+    poor_calibration,
+    by = c(
+      "trust", "trust_name", "specialty"
+    ),
+    unmatched = "ignore"
   ) |>
   mutate(
     trust_name = factor(
@@ -1089,12 +1086,20 @@ scenario_3_projections <- all_projection_data |>
     mar_26_capacity = t_1_capacity + (15 * monthly_cap_change),
     percentage_change = (mar_26_capacity / t_1_capacity) - 1,
     chart_label = case_when(
-      is.nan(annual_linear_uplift) ~ "*",
-      annual_linear_uplift == Inf ~ "*",
-      is.na(annual_linear_uplift) ~ "+",
-      .default = scales::label_percent(accuracy = 1)(percentage_change)
+      status == "low_completed_pathways_in_calibration_period" ~ "-",
+      status == "no_starting_capacity" ~ "+",
+      # annual_linear_uplift == Inf ~ "*",
+      # is.na(annual_linear_uplift) ~ "+",
+      status == "waitlist_cleared" ~ paste0(
+        scales::label_percent(accuracy = 1, big.mark = ",")(percentage_change),
+        "*"
+      ),
+      .default = scales::label_percent(
+        accuracy = 1,
+        big.mark = ",")(percentage_change)
     )
   )
+
 
 # NA means no calibration counts
 # Inf means not possible to optimise based on calibration treatment profile
@@ -1102,6 +1107,16 @@ scenario_3_projections <- all_projection_data |>
 
 if (isTRUE(include_specialty)) {
   # heatmap of capacity change
+  fill_levels <- c(
+    "< -100%",
+    "-100% to -50",
+    "-50% to 0%",
+    "0%",
+    "0 to 50%",
+    "50% to 100%",
+    "> 100%"
+  )
+
   p_heatmap <- list(
     scenario_2_projections,
     scenario_3_projections
@@ -1119,25 +1134,31 @@ if (isTRUE(include_specialty)) {
         ) |>
         mutate(
           fill_colour = case_when(
-            percentage_change < -2 ~ "< -200%",
-            percentage_change < -1 ~ "-200% to -100",
-            percentage_change < 0 ~ "-100% to 0%",
-            percentage_change < 1 ~ "0 - 100%",
-            percentage_change < 2 ~ "100% - 200%",
+            status %in% c(
+              "low_completed_pathways_in_calibration_period",
+              "no_starting_capacity"
+            ) ~ NA,
+            percentage_change < -1 ~ "< -100%",
+            percentage_change < -0.5 ~ "-100% to -50",
+            percentage_change < 0 ~ "-50% to 0%",
+            percentage_change == 0 ~ "0%",
+            percentage_change < 0.5 ~ "0 to 50%",
+            percentage_change < 1 ~ "50% to 100%",
             percentage_change == Inf ~ NA,
             is.nan(percentage_change) ~ NA,
             is.na(percentage_change) ~ NA,
-            .default = "> 200%"
+            .default = "> 100%"
           ),
           fill_colour = factor(
             fill_colour,
             levels = c(
-              "< -200%",
-              "-200% to -100",
-              "-100% to 0%",
-              "0 - 100%",
-              "100% - 200%",
-              "> 200%"
+              "< -100%",
+              "-100% to -50",
+              "-50% to 0%",
+              "0%",
+              "0 to 50%",
+              "50% to 100%",
+              "> 100%"
             )
           )
         ) |>
@@ -1154,7 +1175,7 @@ if (isTRUE(include_specialty)) {
         geom_text(
           aes(
             label = chart_label,
-            colour = fill_colour
+            colour = status
           ),
           show.legend = FALSE
         ) +
@@ -1168,20 +1189,20 @@ if (isTRUE(include_specialty)) {
             vjust = 0.5
           )
         ) +
-        scale_fill_viridis_d(
-          na.value = "white"
+        scale_fill_manual(
+          values = setNames(
+            scales::col_factor(
+              palette = c("green", "white", "red"),
+              domain = fill_levels, ordered = T)(fill_levels),
+            nm = fill_levels
+          )
         ) +
         scale_colour_manual(
           values = c(
-            c(
-              "< -200%" = "white",
-              "-200% to -100" = "white",
-              "-100% to 0%" = "white",
-              "0 - 100%" = "black",
-              "100% - 200%" = "black",
-              "> 200%" = "black"
-            ),
-            na.value = "black"
+            converged = "black",
+            low_completed_pathways_in_calibration_period = "black",
+            no_starting_capacity = "black",
+            waitlist_cleared = "gray30"
           )
         ) +
         labs(
@@ -1191,18 +1212,14 @@ if (isTRUE(include_specialty)) {
           y = "",
           fill = "Relative activity change (Mar 2026 compared with Dec 2024)",
           captions = paste(
-            "* Unable to optimise because of treatment profile in calibration period",
-            "+ No treatments during calibration period",
+            "- low/no completed pathways in calibration period",
+            "+ unable to optimise because starting capacity is zero",
+            "* treatment profile from calibration period causes waiting list to clear",
             sep = "\n"
           )
-        ) #+
-        # guides(
-        #   fill = guide_colourbar(
-        #     title.position = "top",
-        #     title.hjust = 0.5
-        #   )
-        # )
+        )
     )
+
 } else {
   # heatmap of capacity change
   p_heatmap <- list(
@@ -1296,7 +1313,7 @@ p_heatmap |>
   imap(
     \(x, idx) x |>
       ggsave(
-        filename = paste0("outputs/v4/", idx),
+        filename = paste0("outputs/v6/", idx),
         width = fig_width,
         height = 7,
         units = "in",
@@ -1313,7 +1330,7 @@ list(
   iwalk(
     \(x, idx) x  |>
       write.csv(
-        paste0("outputs/v4/", idx, "_activity_requirements_summarised.csv"),
+        paste0("outputs/v6/", idx, "_activity_requirements_summarised.csv"),
         row.names = FALSE
       )
     )
@@ -1382,7 +1399,7 @@ scenario_activity_projections <- list(
         .keep = "unused"
       ) |>
       bind_rows(
-        tbats_data |>
+        monthly_rtt |>
           filter(
             type == "Complete"
           ) |>
@@ -1409,7 +1426,7 @@ iwalk(
   scenario_activity_projections,
   \(x, idx) write.csv(
     x,
-  paste0("outputs/v4/", idx, "_activity_requirements.csv"),
+  paste0("outputs/v6/", idx, "_activity_requirements.csv"),
   row.names = FALSE
   )
 )
@@ -1969,7 +1986,7 @@ ggsave(
 
 # params chart
 
-param_chart <- params |>
+param_chart <- params_final |>
   filter(
     trust == trust_example
   ) |>

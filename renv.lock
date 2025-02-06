@@ -43,25 +43,26 @@
     },
     "NHSRtt": {
       "Package": "NHSRtt",
-      "Version": "0.1.5",
+      "Version": "0.2.0",
       "Source": "GitHub",
       "RemoteType": "github",
       "RemoteHost": "api.github.com",
       "RemoteRepo": "NHSRtt",
       "RemoteUsername": "nhs-bnssg-analytics",
       "RemoteRef": "HEAD",
-      "RemoteSha": "57ab415f0c99135035ce1fcb9eb15571d0411611",
+      "RemoteSha": "d7abb4b7d4602b9931e755a8153caf01da1445e1",
       "Requirements": [
+        "data.table",
         "dplyr",
+        "dtplyr",
         "lubridate",
         "purrr",
-        "readxl",
         "rlang",
         "rvest",
         "tidyr",
         "xml2"
       ],
-      "Hash": "6c66e9024b3032631c1684a43b59fc7d"
+      "Hash": "c8c3f909bf1b3f92ea696de0b087e636"
     },
     "R6": {
       "Package": "R6",
@@ -160,18 +161,6 @@
       ],
       "Hash": "8fcc818f3b9887aebaf206f141437cc9"
     },
-    "cellranger": {
-      "Package": "cellranger",
-      "Version": "1.1.0",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "rematch",
-        "tibble"
-      ],
-      "Hash": "f61dbaec772ccd2e17705c1e872e9e7c"
-    },
     "cli": {
       "Package": "cli",
       "Version": "3.6.3",
@@ -207,18 +196,6 @@
       ],
       "Hash": "9df43854f1c84685d095ed6270b52387"
     },
-    "crayon": {
-      "Package": "crayon",
-      "Version": "1.5.3",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "grDevices",
-        "methods",
-        "utils"
-      ],
-      "Hash": "859d96e65ef198fd43e82b9628d593ef"
-    },
     "curl": {
       "Package": "curl",
       "Version": "6.2.0",
@@ -228,6 +205,17 @@
         "R"
       ],
       "Hash": "b580cbb010099fd990df6bfe44459e1a"
+    },
+    "data.table": {
+      "Package": "data.table",
+      "Version": "1.16.4",
+      "Source": "Repository",
+      "Repository": "RSPM",
+      "Requirements": [
+        "R",
+        "methods"
+      ],
+      "Hash": "38bbf05fc2503143db4c734a7e5cab66"
     },
     "dplyr": {
       "Package": "dplyr",
@@ -251,6 +239,25 @@
         "vctrs"
       ],
       "Hash": "fedd9d00c2944ff00a0e2696ccf048ec"
+    },
+    "dtplyr": {
+      "Package": "dtplyr",
+      "Version": "1.3.1",
+      "Source": "Repository",
+      "Repository": "RSPM",
+      "Requirements": [
+        "R",
+        "cli",
+        "data.table",
+        "dplyr",
+        "glue",
+        "lifecycle",
+        "rlang",
+        "tibble",
+        "tidyselect",
+        "vctrs"
+      ],
+      "Hash": "54ed3ea01b11e81a86544faaecfef8e2"
     },
     "fansi": {
       "Package": "fansi",
@@ -370,20 +377,6 @@
         "stats"
       ],
       "Hash": "de949855009e2d4d0e52a844e30617ae"
-    },
-    "hms": {
-      "Package": "hms",
-      "Version": "1.1.3",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "lifecycle",
-        "methods",
-        "pkgconfig",
-        "rlang",
-        "vctrs"
-      ],
-      "Hash": "b59377caa7ed00fa41808342002138f9"
     },
     "httr": {
       "Package": "httr",
@@ -562,13 +555,13 @@
     },
     "openssl": {
       "Package": "openssl",
-      "Version": "2.3.1",
+      "Version": "2.3.2",
       "Source": "Repository",
       "Repository": "RSPM",
       "Requirements": [
         "askpass"
       ],
-      "Hash": "37a7f0abce0349f5950ce49f38c7626b"
+      "Hash": "bc54d87ebf858b28de18df4bca6528d3"
     },
     "pillar": {
       "Package": "pillar",
@@ -595,30 +588,6 @@
         "utils"
       ],
       "Hash": "01f28d4278f15c76cddbea05899c5d6f"
-    },
-    "prettyunits": {
-      "Package": "prettyunits",
-      "Version": "1.2.0",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R"
-      ],
-      "Hash": "6b01fc98b1e86c4f705ce9dcfd2f57c7"
-    },
-    "progress": {
-      "Package": "progress",
-      "Version": "1.2.3",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "R6",
-        "crayon",
-        "hms",
-        "prettyunits"
-      ],
-      "Hash": "f4625e061cb2865f111b47ff163a5ca6"
     },
     "purrr": {
       "Package": "purrr",
@@ -660,28 +629,6 @@
         "zoo"
       ],
       "Hash": "59321b609790f8ccf92145810e4dd507"
-    },
-    "readxl": {
-      "Package": "readxl",
-      "Version": "1.4.3",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Requirements": [
-        "R",
-        "cellranger",
-        "cpp11",
-        "progress",
-        "tibble",
-        "utils"
-      ],
-      "Hash": "8cf9c239b96df1bbb133b74aef77ad0a"
-    },
-    "rematch": {
-      "Package": "rematch",
-      "Version": "2.0.0",
-      "Source": "Repository",
-      "Repository": "CRAN",
-      "Hash": "cbff1b666c6fa6d21202f07e2318d4f1"
     },
     "renv": {
       "Package": "renv",
