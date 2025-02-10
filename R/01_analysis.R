@@ -2,6 +2,12 @@ source("R/00_libraries.R")
 source("R/02_functions.R")
 # configuration -----------------------------------------------------------
 
+future::plan(
+  multisession,
+  # workers = parallel::detectCores()
+  workers = 8
+)
+
 # final calibration period
 calibration_start <- as.Date("2023-12-01")
 calibration_end <- as.Date("2024-11-30")
@@ -21,7 +27,7 @@ prediction_end <- as.Date("2026-03-31")
 max_months_waited <- 12 # I am only interested in waiting time bins up to 12 months
 
 # should analysis include specialty breakdowns
-include_specialty <- FALSE
+include_specialty <- TRUE
 
 trust_lkp <- tibble::tribble(
   ~trust_code,                                                 ~trust_name,
@@ -130,8 +136,8 @@ monthly_rtt_sw <- monthly_rtt |>
   )
 
 monthly_rtt <- bind_rows(
-  monthly_rtt,
-  monthly_rtt_sw
+  monthly_rtt#,
+  # monthly_rtt_sw
   ) |>
   arrange(
     trust,
@@ -140,6 +146,28 @@ monthly_rtt <- bind_rows(
     type,
     months_waited_id,
     period
+  ) |>
+  tidyr::complete(
+    specialty = sort(unique(monthly_rtt$specialty)),
+    type = c("Complete", "Incomplete"),
+    months_waited_id = sort(unique(monthly_rtt$months_waited_id)),
+    period = sort(unique(monthly_rtt$period)),
+    nesting(
+      trust,
+      trust_name
+    ),
+    fill = list(value = 0)
+  ) |>
+  tidyr::complete(
+    specialty = sort(unique(monthly_rtt$specialty)),
+    type = "Referrals",
+    months_waited_id = 0,
+    period = sort(unique(monthly_rtt$period)),
+    nesting(
+      trust,
+      trust_name
+    ),
+    fill = list(value = 0)
   ) |>
   mutate(
     period_id = dplyr::row_number(), # we need period_id for later steps
@@ -192,7 +220,7 @@ all_calibration_data <- create_modelling_data(
 
 params <- all_calibration_data |>
   mutate(
-    params = purrr::pmap(
+    params = furrr::future_pmap(
       .l = list(
         referrals_data,
         completes_data,
@@ -250,7 +278,7 @@ validation_waiting_times <- all_validation_data |>
     ~ gsub("_data", "", .x)
   ) |>
   mutate(
-    waiting_times = purrr::pmap(
+    waiting_times = furrr::future_pmap(
       .l = list(
         completes,
         referrals,
@@ -379,7 +407,7 @@ p <- validation_error |>
   scale_y_log10()
 
 ggsave(
-  "outputs/v6/mape_by_specialty.png",
+  "outputs/v7/mape_by_specialty.png",
   p,
   width = 8,
   height = 7,
@@ -390,7 +418,7 @@ ggsave(
 # write model error to csv
 write.csv(
   validation_error,
-  "outputs/v6/SW_model_errors.csv",
+  "outputs/v7/SW_model_errors.csv",
   row.names = FALSE
 )
 
@@ -431,7 +459,7 @@ all_calibration_data_final <- create_modelling_data(
 # calculate validation model parameters --------------------------------------------
 params_final <- all_calibration_data_final |>
   mutate(
-    params = purrr::pmap(
+    params = furrr::future_pmap(
       .l = list(
         referrals_data,
         completes_data,
@@ -487,11 +515,20 @@ lm_proj_referrals <- lm_proj_data |>
     type == "Referrals"
   ) |>
   select(!c("type", "months_waited_id")) |>
+  tidyr::complete(
+    specialty = unique(lm_proj_data$specialty),
+    period_id = unique(lm_proj_data$period_id),
+    tidyr::nesting(
+      trust,
+      trust_name
+    ),
+    fill = list(value = 0)
+  ) |>
   tidyr::nest(
     cal_period = c(period, period_id, value)
   ) |>
   mutate(
-    ref_projections = purrr::map(
+    ref_projections = furrr::future_map(
       cal_period,
       \(x) forecast_function(
         rtt_table = x,
@@ -539,11 +576,20 @@ lm_proj_capacity <- lm_proj_data |>
       trust, trust_name, specialty, period, period_id
     )
   ) |>
+  tidyr::complete(
+    specialty = unique(lm_proj_data$specialty),
+    period_id = unique(lm_proj_data$period_id),
+    tidyr::nesting(
+      trust,
+      trust_name
+    ),
+    fill = list(value = 0)
+  ) |>
   tidyr::nest(
     cal_period = c(period, period_id, value)
   ) |>
   mutate(
-    cap_projections = purrr::map(
+    cap_projections = furrr::future_map(
       cal_period,
       \(x) forecast_function(
         rtt_table = x,
@@ -615,15 +661,15 @@ projection_capacity <- monthly_rtt |>
     cal_period = c(period, period_id, value)
   ) |>
   mutate(
-    lm_fit = purrr::map(
+    lm_fit = furrr::future_map(
       cal_period,
       ~ lm(value ~ period, data = .)
     ),
-    pval = purrr::map_dbl(
+    pval = furrr::future_map_dbl(
       lm_fit,
       \(x) broom::tidy(x) |> filter(term == "period") |> pull(p.value)
     ),
-    lm_val = purrr::map_dbl(
+    lm_val = furrr::future_map_dbl(
       lm_fit,
       ~ predict(
         object = .x,
@@ -655,7 +701,16 @@ lm_proj_incompletes_at_t0 <- lm_proj_data |>
     type == "Incomplete",
     period_id == max(period_id)
   ) |>
-  select(!c("period_id", "type")) |>
+  select(!c("period", "period_id", "type")) |>
+  tidyr::complete(
+    specialty = unique(lm_proj_data$specialty),
+    months_waited_id = unique(lm_proj_data$months_waited_id),
+    tidyr::nesting(
+      trust,
+      trust_name
+    ),
+    fill = list(value = 0)
+  ) |>
   rename(
     incompletes = "value"
   ) |>
@@ -732,7 +787,7 @@ period_lkp <- dplyr::tibble(
 
 scenario_1 <- all_scenario_1_data |>
   mutate(
-    waiting_times = purrr::pmap(
+    waiting_times = furrr::future_pmap(
       .l = list(
         cap_projections,
         ref_projections,
@@ -775,7 +830,7 @@ write.csv(
     arrange(
       trust, specialty, referrals_scenario, capacity_scenario, period, months_waited_id
     ),
-  "outputs/v6/unoptimised_scenarios.csv",
+  "outputs/v7/unoptimised_scenarios.csv",
   row.names = FALSE
 )
 
@@ -786,7 +841,7 @@ data_projections_ref_cap_scenarios <- all_scenario_1_data |>
     "referrals_scenario", "ref_projections"
   ) |>
   mutate(
-    projections = map2(
+    projections = furrr::future_map2(
       cap_projections,
       ref_projections,
       ~ bind_cols(
@@ -852,7 +907,7 @@ monthly_rtt |>
     trust, specialty, period
   ) |>
   write.csv(
-    "outputs/v6/activity_referral_lm_projections.csv",
+    "outputs/v7/activity_referral_lm_projections.csv",
     row.names = FALSE
   )
 
@@ -871,6 +926,14 @@ poor_calibration <- calibration_period |>
     .by = c(
       trust, trust_name, specialty
     )
+  ) |>
+  tidyr::complete(
+    specialty,
+    nesting(
+      trust,
+      trust_name
+    ),
+    fill = list(value = 0)
   ) |>
   filter(
     value <= threshold
@@ -937,7 +1000,6 @@ trust_targets <- all_calibration_data |>
 
 
 # create projections for scenario 2
-
 scenario_2_projections <- all_projection_data |>
   filter(
     referrals_scenario == "Expected_referrals"
@@ -948,7 +1010,7 @@ scenario_2_projections <- all_projection_data |>
     relationship = "many-to-one"
   ) |>
   mutate(
-    annual_linear_uplift = purrr::pmap(
+    annual_linear_uplift = furrr::future_pmap(
       .l = list(
         t_1_capacity,
         ref_projections,
@@ -1028,7 +1090,7 @@ scenario_3_projections <- all_projection_data |>
     referrals_scenario == "Expected_referrals"
   ) |>
   mutate(
-    annual_linear_uplift = purrr::pmap(
+    annual_linear_uplift = furrr::future_pmap(
       .l = list(
         t_1_capacity,
         ref_projections,
@@ -1127,7 +1189,7 @@ if (isTRUE(include_specialty)) {
         "Required activity change March 2026 relative to Dec 2024 to meet 52ww targets"
       )
     ) |>
-    purrr::imap(
+    furrr::future_imap(
       \(x, idx) x |>
         filter(
           referrals_scenario == "Expected_referrals"
@@ -1232,7 +1294,7 @@ if (isTRUE(include_specialty)) {
         "Required activity change March 2026 relative to Dec 2024 to meet 52ww targets"
       )
     ) |>
-    purrr::imap(
+    furrr::future_imap(
       \(x, idx) x |>
         filter(
           referrals_scenario == "Expected_referrals"
@@ -1310,10 +1372,10 @@ p_heatmap |>
       "activity_requirements_52ww.png"
     )
   ) |>
-  imap(
+  furrr::future_imap(
     \(x, idx) x |>
       ggsave(
-        filename = paste0("outputs/v6/", idx),
+        filename = paste0("outputs/v7/", idx),
         width = fig_width,
         height = 7,
         units = "in",
@@ -1330,7 +1392,7 @@ list(
   iwalk(
     \(x, idx) x  |>
       write.csv(
-        paste0("outputs/v6/", idx, "_activity_requirements_summarised.csv"),
+        paste0("outputs/v7/", idx, "_activity_requirements_summarised.csv"),
         row.names = FALSE
       )
     )
@@ -1341,7 +1403,7 @@ scenario_activity_projections <- list(
   scenario_2 = scenario_2_projections,
   scenario_3 = scenario_3_projections
 ) |>
-  imap(
+  furrr::future_imap(
     \(x, idx) x |>
       select(
         trust, trust_name, specialty, referrals_scenario, t_1_capacity, annual_linear_uplift
@@ -1365,12 +1427,12 @@ scenario_activity_projections <- list(
         cap_data = c(period_id, capacity)
       ) |>
       mutate(
-        lm_fit = purrr::map(
+        lm_fit = furrr::future_map(
           cap_data,
           \(x) lm(capacity ~ period_id, data = x)
 
         ),
-        projections = purrr::map(
+        projections = furrr::future_map(
           lm_fit,
           \(x) tibble(required_activity = predict(object = x, newdata = tibble(period_id = 1:16))) |>
             mutate(
@@ -1426,7 +1488,7 @@ iwalk(
   scenario_activity_projections,
   \(x, idx) write.csv(
     x,
-  paste0("outputs/v6/", idx, "_activity_requirements.csv"),
+  paste0("outputs/v7/", idx, "_activity_requirements.csv"),
   row.names = FALSE
   )
 )
@@ -1798,7 +1860,7 @@ optimised_projection_data <- all_projection_data |>
 
 future_projections <- optimised_projection_data |>
   mutate(
-    waiting_times = purrr::pmap(
+    waiting_times = furrr::future_pmap(
       .l = list(
         capacity,
         ref_projections,
@@ -2138,8 +2200,8 @@ optimised_projection_data <- all_projection_data |>
         model_data = c(period_id, value)
       ) |>
       mutate(
-        lm_fit = map(model_data, ~lm(value ~ period_id, data = .x)),
-        capacity = map(lm_fit, ~predict(.x, newdata = tibble(period_id = 1:16)) |> enframe())
+        lm_fit = furrr::future_map(model_data, ~lm(value ~ period_id, data = .x)),
+        capacity = furrr::future_map(lm_fit, ~predict(.x, newdata = tibble(period_id = 1:16)) |> enframe())
       ) |>
       select(trust, capacity),
     by = join_by(
@@ -2149,7 +2211,7 @@ optimised_projection_data <- all_projection_data |>
 
 future_projections <- optimised_projection_data |>
   mutate(
-    waiting_times = purrr::pmap(
+    waiting_times = furrr::future_pmap(
       .l = list(
         capacity,
         ref_projections,
@@ -2214,7 +2276,7 @@ year_on_comparison <- future_projections |>
   left_join(
     lm_proj_incompletes_at_t0 |>
       mutate(
-        nov_24_incomplete_proportion = purrr::map_dbl(
+        nov_24_incomplete_proportion = furrr::future_map_dbl(
           incompletes_t0,
           \(x) x  |>
             mutate(

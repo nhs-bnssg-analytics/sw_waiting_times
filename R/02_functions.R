@@ -1,4 +1,22 @@
-create_modelling_data <- function(data) {
+create_modelling_data <- function(data, max_months_waited) {
+  periods <- unique(
+    sort(
+      data$period_id
+    )
+  )
+
+  months_waited <- unique(
+    sort(
+      data$months_waited_id
+    )
+  )
+
+  specialties <- unique(
+    sort(
+      data$specialty
+    )
+  )
+
   referrals <- data |>
     filter(
       type == "Referrals"
@@ -12,6 +30,15 @@ create_modelling_data <- function(data) {
     ) |>
     rename(
       referrals = "value"
+    ) |>
+    tidyr::complete(
+      period_id = periods,
+      specialty = specialties,
+      tidyr::nesting(
+        trust,
+        trust_name
+      ),
+      fill = list(referrals = 0)
     ) |>
     tidyr::nest(
       referrals_data = c(
@@ -34,6 +61,16 @@ create_modelling_data <- function(data) {
     ) |>
     rename(
       treatments = "value"
+    ) |>
+    tidyr::complete(
+      specialty = specialties,
+      period_id = periods,
+      months_waited_id = months_waited,
+      tidyr::nesting(
+        trust,
+        trust_name
+      ),
+      fill = list(treatments = 0)
     ) |>
     tidyr::nest(
       completes_data = c(
@@ -58,6 +95,16 @@ create_modelling_data <- function(data) {
     ) |>
     rename(
       incompletes = "value"
+    ) |>
+    tidyr::complete(
+      specialty = specialties,
+      period_id = periods,
+      months_waited_id = months_waited,
+      tidyr::nesting(
+        trust,
+        trust_name
+      ),
+      fill = list(incompletes = 0)
     ) |>
     tidyr::nest(
       incompletes_data = c(
@@ -193,10 +240,10 @@ forecast_function <- function(rtt_table, number_timesteps, method, percent_chang
           period_id == "final" ~ number_timesteps,
           .default = NA_real_
         )
-      ) |>
+      ) %>%
       summarise(
         lm_fit = list(
-          lm(value ~ period_id, data = cur_data())
+          lm(value ~ period_id, data = .)
         ),
         .by = scenario
       ) |>
